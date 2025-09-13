@@ -3,9 +3,9 @@
     {
       "name": "tournament",
       "aliases": ["tournament3", "tournament_k"],
-      "description": "Tournament selection with parameter k (tournament size). Balanced pressure.",
+      "description": "Tournament selection with parameter tournsize (selection pressure).",
       "params_schema": {
-        "k": {"type": "int", "min": 2, "max": 7, "default": 3, "description": "Tournament size (selection pressure)."}
+        "tournsize": {"type": "int", "min": 2, "max": 7, "default": 3, "description": "Tournament size (selection pressure)."}
       }
     },
     {
@@ -18,6 +18,18 @@
       "name": "best",
       "aliases": ["selBest"],
       "description": "Pick the best individuals; strong exploitation; may reduce diversity.",
+      "params_schema": {}
+    },
+    {
+      "name": "random",
+      "aliases": ["selRandom"],
+      "description": "Uniform random selection; maximizes diversity (no fitness pressure).",
+      "params_schema": {}
+    },
+    {
+      "name": "roulette",
+      "aliases": ["selRoulette"],
+      "description": "Fitness-proportionate selection (requires mostly non-negative fitness values).",
       "params_schema": {}
     }
   ],
@@ -37,29 +49,63 @@
     {
       "name": "uniform",
       "aliases": ["cxUniform", "uniform_p"],
-      "description": "Uniform crossover; per-bit exchange probability prob in [0,1] (default 0.5).",
+      "description": "Uniform crossover; per-bit exchange probability indpb in [0,1] (default 0.5).",
       "params_schema": {
-        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "description": "Per-bit exchange probability."}
+        "indpb": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "description": "Per-bit exchange probability (DEAP: indpb)."}
       }
+    },
+    {
+      "name": "k_point",
+      "aliases": ["cxKPoint"],
+      "description": "K-point crossover with k cut points (k>=1).",
+      "params_schema": {
+        "k": {"type": "int", "min": 1, "max": 32, "default": 3, "description": "Number of cut points."}
+      }
+    },
+    {
+      "name": "and_or",
+      "aliases": ["cxAndOr"],
+      "description": "Bitwise AND/OR crossover (child1=AND, child2=OR).",
+      "params_schema": {}
+    },
+    {
+      "name": "hux",
+      "aliases": ["cxHUX"],
+      "description": "Half Uniform Crossover: swap half of differing bits.",
+      "params_schema": {}
     }
   ],
   "mutation": [
     {
       "name": "flip_bit",
       "aliases": ["bit_flip", "mutFlipBit"],
-      "description": "Binary flip mutation; per-bit probability prob (default 1/n_features).",
+      "description": "Binary flip mutation; per-bit probability indpb (default 1/n_features).",
       "params_schema": {
-        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit flip probability; usually 1/n_features."}
+        "indpb": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit flip probability; usually 1/n_features (DEAP: indpb)."}
       }
     },
     {
       "name": "uniform_int",
       "aliases": ["mutUniformInt"],
-      "description": "Uniform integer mutation for {0,1}; per-bit probability prob.",
+      "description": "Uniform integer mutation for {0,1}; per-bit probability indpb.",
       "params_schema": {
-        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit mutation probability."},
+        "indpb": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit mutation probability (DEAP: indpb)."},
         "low": {"type": "int", "default": 0, "description": "Lower bound (inclusive)."},
         "up": {"type": "int", "default": 1, "description": "Upper bound (inclusive)."}
+      }
+    },
+    {
+      "name": "invert_segment",
+      "aliases": ["mutInvertSegment"],
+      "description": "Invert bits on a random contiguous segment.",
+      "params_schema": {}
+    },
+    {
+      "name": "k_flip",
+      "aliases": ["mutKFlip"],
+      "description": "Flip exactly k random bits (k>=1).",
+      "params_schema": {
+        "k": {"type": "int", "min": 1, "max": 128, "default": 1, "description": "Number of bits to flip."}
       }
     }
   ]

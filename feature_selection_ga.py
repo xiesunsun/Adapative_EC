@@ -38,8 +38,11 @@ try:
     )
     from aos.prompts import build_state_prompt_v2, build_decision_prompt_v2
     from aos.schema import validate_decision
-except Exception:
+except Exception as _AOS_IMPORT_EXC:  # capture reason for diagnostics
     AOSAdapter = None  # type: ignore
+    AOS_IMPORT_ERROR = str(_AOS_IMPORT_EXC)
+else:
+    AOS_IMPORT_ERROR = ""
 
 
 # -----------------------------
@@ -289,6 +292,8 @@ def run_ga(
     aos_max_retries: int = 3,
     aos_include_images: bool = False,
     aos_debug: bool = False,
+    aos_strict: bool = False,
+    aos_init: bool = False,
 ) -> Tuple[List[int], float, tools.Logbook, tools.HallOfFame]:
     if seed is not None:
         random.seed(seed)
@@ -325,23 +330,45 @@ def run_ga(
 
     # Define operator pools (function, kwargs, human-readable name)
     selection_pool = [
-        (tools.selTournament, {"tournsize": 3}, "tournament3"),
+        (tools.selTournament, {"tournsize": 3}, "tournament"),
         (tools.selStochasticUniversalSampling, {}, "sus"),
         (tools.selBest, {}, "best"),
     ]
+    # Extended crossover pool including custom operators for binary strings
+    from aos.operators import default_registry as _opreg
+    _reg = _opreg()
+    def _cx_and_or(a, b):
+        func, kwargs = _reg.bind("crossover", "and_or", {}, {"n_features": n_features})
+        return func(a, b)
+    def _cx_hux(a, b):
+        func, kwargs = _reg.bind("crossover", "hux", {}, {"n_features": n_features})
+        return func(a, b)
+    def _cx_k3(a, b):
+        func, kwargs = _reg.bind("crossover", "k_point", {"k": 3}, {"n_features": n_features})
+        return func(a, b, **kwargs)
     crossover_pool = [
         (tools.cxOnePoint, {}, "one_point"),
         (tools.cxTwoPoint, {}, "two_point"),
-        (tools.cxUniform, {"indpb": 0.5}, "uniform_p0.5"),
+        (tools.cxUniform, {"indpb": 0.5}, "uniform"),
+        (_cx_k3, {}, "k_point"),
+        (_cx_hux, {}, "hux"),
+        (_cx_and_or, {}, "and_or"),
     ]
+    def _mut_invert(ind):
+        func, kwargs = _reg.bind("mutation", "invert_segment", {}, {"n_features": n_features})
+        return func(ind)
+    def _mut_k2(ind):
+        func, kwargs = _reg.bind("mutation", "k_flip", {"k": 2}, {"n_features": n_features})
+        return func(ind, **kwargs)
     mutation_pool = [
         (tools.mutFlipBit, {"indpb": 1.0 / n_features}, "flip_bit"),
         (tools.mutUniformInt, {"low": 0, "up": 1, "indpb": 1.0 / n_features}, "uniform_int"),
-        # Removed mutShuffleIndexes: not semantically suitable for binary feature masks (reorders positions)
+        (_mut_invert, {}, "invert_segment"),
+        (_mut_k2, {}, "k_flip"),
     ]
 
     # Current operator names for logging
-    current_op_sel = "tournament3"
+    current_op_sel = "tournament"
     current_op_cx = "two_point"
     current_op_mut = "flip_bit"
 
@@ -428,6 +455,21 @@ def run_ga(
         window_effective: List[bool] = []
         prev_diversity = None
 
+        # One-time setup diagnostics for AOS/switching
+        try:
+            print(
+                f"[AOS][SETUP] enable={aos_enable}, adapter_imported={AOSAdapter is not None}, "
+                f"debug={aos_debug}, include_images={aos_include_images}, mode={'adaptive' if adaptive_switch else 'fixed'}, "
+                f"interval={op_switch_interval}, base_interval={switch_base_interval}"
+            )
+            if AOSAdapter is None:
+                msg = AOS_IMPORT_ERROR if 'AOS_IMPORT_ERROR' in globals() else '(unknown import error)'
+                print(f"[AOS][SETUP] adapter unavailable: {msg}")
+                if aos_enable and aos_strict:
+                    raise SystemExit("AOS strict mode: adapter unavailable")
+        except Exception:
+            pass
+
         # Evaluate the entire population
         invalid_ind = [ind for ind in population if not ind.fitness.valid]
         fitnesses = list(map(toolbox.evaluate, invalid_ind))
@@ -484,6 +526,76 @@ def run_ga(
                 aos_adapter = None
                 aos_cfg = None
 
+        # Optional: initial AOS decision at start (choose initial operators and rates)
+        if aos_enable and aos_init and aos_adapter is not None and aos_cfg is not None:
+            try:
+                if aos_debug:
+                    print("[AOS][INIT] Requesting initial operators and rates...")
+                from aos.config_loader import build_decision_payload_from_configs
+                init_payload = build_decision_payload_from_configs(
+                    aos_cfg,
+                    state_text="Initial stage: please choose initial operators and cxpb/mutpb.",
+                    current_iteration=0,
+                )
+                if aos_debug:
+                    msgs_dbg = build_decision_prompt_v2(init_payload)
+                    print("[AOS][REQUEST][INIT] choose_operators messages:")
+                    for i, m in enumerate(msgs_dbg):
+                        role = m.get("role"); content = m.get("content", "")
+                        print(f"--- message {i} ({role}) ---\n{content}\n")
+                data_dec0 = aos_adapter.client.chat(messages=build_decision_prompt_v2(init_payload), temperature=0.1, response_format="json_object")
+                raw0 = data_dec0["choices"][0]["message"].get("content", "{}")
+                if aos_debug:
+                    print("[AOS][RESPONSE][INIT] raw content:\n", raw0)
+                try:
+                    import json as _json
+                    parsed0 = _json.loads(raw0)
+                except Exception:
+                    s = raw0.find("{"); e = raw0.rfind("}")
+                    parsed0 = _json.loads(raw0[s:e+1]) if s >= 0 and e >= 0 else {}
+                decision0, warn0 = validate_decision(parsed0)
+                if warn0 and aos_debug:
+                    print("[AOS][POST][INIT] warnings:", warn0)
+                # Bind using registry
+                from aos.operators import default_registry
+                reg0 = default_registry()
+                ctx0 = {"n_features": n_features}
+                s0 = decision0.get("Selection", {})
+                c0 = decision0.get("Crossover", {})
+                m0 = decision0.get("Mutation", {})
+                sel0 = reg0.canonicalize("selection", s0.get("name"))
+                sel_norm0 = reg0.normalize_params("selection", sel0, s0.get("parameter", {}))
+                sel_func0, sel_kwargs0 = reg0.bind("selection", sel0, sel_norm0, ctx0)
+                cx0 = reg0.canonicalize("crossover", c0.get("name"))
+                cx_norm0 = reg0.normalize_params("crossover", cx0, c0.get("parameter", {}))
+                cx_func0, cx_kwargs0 = reg0.bind("crossover", cx0, cx_norm0, ctx0)
+                mut0 = reg0.canonicalize("mutation", m0.get("name"))
+                mut_norm0 = reg0.normalize_params("mutation", mut0, m0.get("parameter", {}))
+                mut_func0, mut_kwargs0 = reg0.bind("mutation", mut0, mut_norm0, ctx0)
+                # Apply bindings
+                bind_select(sel_func0, sel_kwargs0, sel0)
+                bind_mate_core(cx_func0, cx_kwargs0, cx0)
+                bind_mutate_core(mut_func0, mut_kwargs0, mut0)
+                current_op_sel = sel0
+                current_op_cx = cx0
+                current_op_mut = mut0
+                current_sel_params = dict(sel_kwargs0)
+                current_cx_params = dict(cx_kwargs0)
+                current_mut_params = dict(mut_kwargs0)
+                # Rates
+                cxpb = float(decision0.get("cxpb", cxpb))
+                mutpb = float(decision0.get("mutpb", mutpb))
+                if aos_debug:
+                    print(
+                        f"[AOS][APPLY][INIT] sel={current_op_sel} {current_sel_params}; "
+                        f"cx={current_op_cx} {current_cx_params}; mut={current_op_mut} {current_mut_params}; "
+                        f"cxpb={cxpb:.3f}, mutpb={mutpb:.3f}"
+                    )
+            except Exception as e:
+                print("[AOS][ERROR][INIT] initial decision:", e)
+                if aos_strict:
+                    raise SystemExit(f"AOS strict mode: initial decision failed: {e}")
+
         # Begin the generational process
         for gen in range(1, ngen + 1):
             # Build a per-generation splitter for SR fairness if enabled
@@ -505,6 +617,7 @@ def run_ga(
             if do_switch:
                 # Ensure latest overview plot is available before summarization/decision
                 try:
+                    # Always generate the default overview under output_dir
                     plot_overview(logbook, output_dir)
                 except Exception:
                     pass
@@ -520,7 +633,26 @@ def run_ga(
                 if aos_adapter is not None and aos_cfg is not None:
                     try:
                         from aos.config_loader import build_state_payload_from_configs, build_decision_payload_from_configs
-                        overview_path = aos_cfg.get("algo_config", {}).get("paths", {}).get("overview_image", os.path.join("ga_results", "overview.png"))
+                        # Resolve overview image path: prefer config paths.overview_image but anchor to current output_dir
+                        try:
+                            cfg_overview = aos_cfg.get("algo_config", {}).get("paths", {}).get("overview_image", "overview.png")
+                        except Exception:
+                            cfg_overview = "overview.png"
+                        def _resolve_under(base_dir: str, p: str) -> str:
+                            import os as _os
+                            return p if _os.path.isabs(p) else _os.path.join(base_dir, p)
+                        # Path where plot_overview just wrote
+                        overview_default = os.path.join(output_dir, "overview.png")
+                        # Target path for AOS (relative cfg path will be placed under output_dir)
+                        overview_path = _resolve_under(output_dir, str(cfg_overview))
+                        # If different, try to replicate/copy so that the configured path exists for AOS
+                        try:
+                            if overview_path != overview_default and os.path.exists(overview_default):
+                                os.makedirs(os.path.dirname(overview_path), exist_ok=True)
+                                import shutil as _sh
+                                _sh.copy2(overview_default, overview_path)
+                        except Exception:
+                            pass
                         state_payload = build_state_payload_from_configs(aos_cfg, current_generation=gen, overview_image=overview_path)
                         # Inject current dynamic rates (may be changed by previous decisions)
                         try:
@@ -529,6 +661,8 @@ def run_ga(
                         except Exception:
                             pass
                         print(f"[AOS] Switch at gen={gen} (interval={cur_interval}, adaptive_switching={adaptive_switch}, aos_enabled={bool(aos_adapter)})")
+                        if aos_debug:
+                            print(f"[AOS][SETUP] endpoint={aos_endpoint}, model={aos_model}")
                         # Summarize state: print prompt and response when debug
                         try:
                             if aos_debug:
@@ -545,6 +679,8 @@ def run_ga(
                                 print("[AOS][RESPONSE] summarize_state raw content:\n", state_text)
                         except Exception as e:
                             print("[AOS][ERROR] summarize_state:", e)
+                            if aos_strict:
+                                raise SystemExit(f"AOS strict mode: summarize_state failed: {e}")
                             state_text = ""
                         # Choose operators: print prompt and response when debug
                         try:
@@ -573,52 +709,57 @@ def run_ga(
                                 print("[AOS][POST] normalized decision:", decision)
                         except Exception as e:
                             print("[AOS][ERROR] choose_operators:", e)
+                            if aos_strict:
+                                raise SystemExit(f"AOS strict mode: choose_operators failed: {e}")
                             raise
-                        # Map decision to DEAP
+                        # Map decision to DEAP using operator registry
                         s = decision.get("Selection", {})
                         c = decision.get("Crossover", {})
                         m = decision.get("Mutation", {})
-                        # Selection
-                        if s.get("name") == "tournament":
-                            k = int(s.get("parameter", {}).get("k", 3))
-                            sel_func, sel_kwargs, sel_name = tools.selTournament, {"tournsize": k}, "tournament"
-                            current_sel_params = {"tournsize": k}
-                        elif s.get("name") == "sus":
-                            sel_func, sel_kwargs, sel_name = tools.selStochasticUniversalSampling, {}, "sus"
-                            current_sel_params = {}
-                        elif s.get("name") == "best":
-                            sel_func, sel_kwargs, sel_name = tools.selBest, {}, "best"
-                            current_sel_params = {}
-                        # Crossover
-                        if c.get("name") == "one_point":
-                            cx_func, cx_kwargs, cx_name = tools.cxOnePoint, {}, "one_point"
-                            current_cx_params = {}
-                        elif c.get("name") == "two_point":
-                            cx_func, cx_kwargs, cx_name = tools.cxTwoPoint, {}, "two_point"
-                            current_cx_params = {}
-                        elif c.get("name") == "uniform":
-                            prob = float(c.get("parameter", {}).get("prob", 0.5))
-                            cx_func, cx_kwargs, cx_name = tools.cxUniform, {"indpb": max(0.0, min(1.0, prob))}, "uniform"
-                            current_cx_params = {"indpb": max(0.0, min(1.0, prob))}
-                        # Mutation
-                        if m.get("name") == "flip_bit":
-                            prob = float(m.get("parameter", {}).get("prob", 0.0))
-                            indpb_val = prob if prob > 0 else (1.0 / n_features)
-                            mut_func, mut_kwargs, mut_name = tools.mutFlipBit, {"indpb": max(0.0, min(1.0, indpb_val))}, "flip_bit"
-                            current_mut_params = {"indpb": max(0.0, min(1.0, indpb_val))}
-                        elif m.get("name") == "uniform_int":
-                            p = float(m.get("parameter", {}).get("prob", 0.0))
-                            indpb_val = p if p > 0 else (1.0 / n_features)
-                            low = int(m.get("parameter", {}).get("low", 0))
-                            up = int(m.get("parameter", {}).get("up", 1))
-                            if up < low:
-                                up = low
-                            mut_func, mut_kwargs, mut_name = tools.mutUniformInt, {"low": low, "up": up, "indpb": max(0.0, min(1.0, indpb_val))}, "uniform_int"
-                            current_mut_params = {"low": low, "up": up, "indpb": max(0.0, min(1.0, indpb_val))}
+                        try:
+                            from aos.operators import default_registry
+                            reg = default_registry()
+                            ctx = {"n_features": n_features}
+                            # Selection
+                            sel_name_canon = reg.canonicalize("selection", s.get("name"))
+                            sel_norm = reg.normalize_params("selection", sel_name_canon, s.get("parameter", {}))
+                            sel_func, sel_kwargs = reg.bind("selection", sel_name_canon, sel_norm, ctx)
+                            sel_name = sel_name_canon
+                            current_sel_params = dict(sel_kwargs)
+                            # Crossover
+                            cx_name_canon = reg.canonicalize("crossover", c.get("name"))
+                            cx_norm = reg.normalize_params("crossover", cx_name_canon, c.get("parameter", {}))
+                            cx_func, cx_kwargs = reg.bind("crossover", cx_name_canon, cx_norm, ctx)
+                            cx_name = cx_name_canon
+                            current_cx_params = dict(cx_kwargs)
+                            # Mutation
+                            mut_name_canon = reg.canonicalize("mutation", m.get("name"))
+                            mut_norm = reg.normalize_params("mutation", mut_name_canon, m.get("parameter", {}))
+                            mut_func, mut_kwargs = reg.bind("mutation", mut_name_canon, mut_norm, ctx)
+                            mut_name = mut_name_canon
+                            current_mut_params = dict(mut_kwargs)
+                        except Exception as e:
+                            # If registry fails for any reason, leave func/kwargs as None to trigger fallback
+                            if aos_strict:
+                                raise SystemExit(f"AOS strict mode: registry binding failed: {e}")
+                            pass
                         # Rates
                         cxpb = float(decision.get("cxpb", cxpb))
                         mutpb = float(decision.get("mutpb", mutpb))
+                        if aos_debug:
+                            try:
+                                print(
+                                    f"[AOS][APPLY] gen={gen}: "
+                                    f"sel={sel_name} params={current_sel_params}; "
+                                    f"cx={cx_name} params={current_cx_params}; "
+                                    f"mut={mut_name} params={current_mut_params}; "
+                                    f"cxpb={cxpb:.3f}, mutpb={mutpb:.3f}"
+                                )
+                            except Exception:
+                                pass
                     except Exception:
+                        if aos_strict:
+                            raise
                         pass
 
                 # Fallback to random pick different from current names
@@ -629,19 +770,40 @@ def run_ga(
                     return func, kwargs, name
 
                 if sel_func is None:
+                    if aos_enable and aos_strict:
+                        raise SystemExit("AOS strict mode: selection not decided; refusing random fallback")
+                    if aos_adapter is None or aos_cfg is None:
+                        try:
+                            print("[AOS][INFO] AOS not active; falling back to random operator pick for selection")
+                        except Exception:
+                            pass
                     sel_func, sel_kwargs, sel_name = pick(selection_pool, current_op_sel)
                     # Update params from picked kwargs
-                    if sel_name == "tournament3":
+                    if sel_name in ("tournament", "tournament3"):
                         current_sel_params = {"tournsize": int(sel_kwargs.get("tournsize", 3))}
                     else:
                         current_sel_params = {}
                 if cx_func is None:
+                    if aos_enable and aos_strict:
+                        raise SystemExit("AOS strict mode: crossover not decided; refusing random fallback")
+                    if aos_adapter is None or aos_cfg is None:
+                        try:
+                            print("[AOS][INFO] AOS not active; falling back to random operator pick for crossover")
+                        except Exception:
+                            pass
                     cx_func, cx_kwargs, cx_name = pick(crossover_pool, current_op_cx)
                     if cx_name.startswith("uniform"):
                         current_cx_params = {"indpb": float(cx_kwargs.get("indpb", 0.5))}
                     else:
                         current_cx_params = {}
                 if mut_func is None:
+                    if aos_enable and aos_strict:
+                        raise SystemExit("AOS strict mode: mutation not decided; refusing random fallback")
+                    if aos_adapter is None or aos_cfg is None:
+                        try:
+                            print("[AOS][INFO] AOS not active; falling back to random operator pick for mutation")
+                        except Exception:
+                            pass
                     mut_func, mut_kwargs, mut_name = pick(mutation_pool, current_op_mut)
                     if mut_name == "flip_bit":
                         current_mut_params = {"indpb": float(mut_kwargs.get("indpb", 1.0 / n_features))}
@@ -966,6 +1128,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--aos-max-retries", type=int, default=3)
     p.add_argument("--aos-include-images", action="store_true", help="Include charts as base64 in prompts")
     p.add_argument("--aos-debug", action="store_true", help="Print AOS prompts and responses for debugging")
+    p.add_argument("--aos-strict", action="store_true", help="Fail fast at switch points if AOS is unavailable or errors")
+    p.add_argument("--aos-init", action="store_true", help="At start, ask LLM to choose initial operators and cxpb/mutpb")
     p.add_argument("--aos-config-dir", type=str, default="config", help="Directory holding task/operator/algo config JSONs")
     return p.parse_args()
 
@@ -1545,6 +1709,8 @@ def main():
     aos_max_retries = args.aos_max_retries
     aos_include_images = args.aos_include_images
     aos_debug = args.aos_debug
+    aos_strict = args.aos_strict
+    aos_init = args.aos_init
 
     if cfgs is not None:
         ac = cfgs.get("algo_config", {})
@@ -1581,8 +1747,19 @@ def main():
         aos_enable = bool(aos.get("enabled", aos_enable))
         aos_endpoint = aos.get("endpoint", aos_endpoint)
         aos_model = aos.get("model", aos_model)
+        # Allow timeout and retries to be configured via config
+        try:
+            aos_timeout = float(aos.get("timeout", aos_timeout))
+        except Exception:
+            pass
+        try:
+            aos_max_retries = int(aos.get("max_retries", aos_max_retries))
+        except Exception:
+            pass
         aos_include_images = bool(aos.get("include_images", aos_include_images))
         aos_debug = bool(aos.get("debug", aos_debug))
+        aos_strict = bool(aos.get("strict", aos_strict))
+        aos_init = bool(aos.get("init_on_start", aos_init))
 
     best_mask, best_fit, logbook, hof = run_ga(
         X=data.X,
@@ -1620,6 +1797,8 @@ def main():
         aos_max_retries=aos_max_retries,
         aos_include_images=aos_include_images,
         aos_debug=aos_debug,
+        aos_strict=aos_strict,
+        aos_init=aos_init,
     )
 
     # Compute unpenalized downstream metric for the best mask

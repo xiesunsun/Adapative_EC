@@ -109,10 +109,11 @@ Configuration-Driven Runs (Recommended)
         "fitness_function": "CV_mean - alpha * (k/d)",
         "alpha": 0.02
       }
-  - `config/operator_pools.json` — operator pools with parameter schema (for AOS prompts)
-    - Selection: tournament (params: k), sus, best
-    - Crossover: one_point, two_point, uniform (params: prob)
-    - Mutation: flip_bit (params: prob), uniform_int (params: prob, low, up)
+  - `config/operator_pools.json` — operator pools with parameter schema (for AOS prompts). Parameters use DEAP names directly.
+    - Selection: tournament (params: tournsize), sus, best, random, roulette
+    - Crossover: one_point, two_point, uniform (indpb), k_point (k), hux, and_or
+    - Mutation: flip_bit (indpb), uniform_int (indpb, low, up), invert_segment, k_flip (k)
+    - This file is generated from the unified registry: `python scripts/generate_operator_pools.py`
   - `config/algo_config.json` — GA hyperparams, switching strategy, AOS options, paths
     - ga: {pop_size, generations, cv, alpha, scoring, classifier, sr_fair_cv}
     - operator_rates: {cxpb, mutpb}
@@ -134,20 +135,33 @@ Operator Switching and AOS
   - At each switch point:
     1) Refresh overview.png
     2) Summarize state (v2 prompt). If `include_images=true`, overview.png is attached as base64
-    3) Ask for operator decision (v2 prompt). Expected JSON (v2 format):
+    3) Ask for operator decision (v2 prompt). Expected JSON (v2 format; DEAP param names):
        {
          "cxpb": 0.7,
          "mutpb": 0.3,
-         "Selection": {"name": "tournament", "parameter": {"k": 3}},
-         "Crossover": {"name": "uniform", "parameter": {"prob": 0.5}},
-         "Mutation": {"name": "flip_bit", "parameter": {"prob": 0.033}}
+         "Selection": {"name": "tournament", "parameter": {"tournsize": 3}},
+         "Crossover": {"name": "uniform", "parameter": {"indpb": 0.5}},
+         "Mutation": {"name": "flip_bit", "parameter": {"indpb": 0.033}}
        }
-    4) Bind decision to DEAP:
-       - tournament(k) → selTournament(tournsize=k)
-       - uniform(prob) → cxUniform(indpb=prob)
-       - flip_bit(prob) → mutFlipBit(indpb=prob | 1/n_features if 0)
-       - uniform_int(prob, low, up) → mutUniformInt(low, up, indpb=prob | 1/n_features if 0)
+    4) Bind decision to DEAP (no extra mapping; use DEAP param names):
+       - tournament: {tournsize}
+       - uniform: {indpb}
+       - flip_bit: {indpb} (if omitted, defaults to 1/n_features)
+       - uniform_int: {low, up, indpb} (if indpb omitted, defaults to 1/n_features)
   - If AOS is disabled (or request fails), switching falls back to a small random operator pick from the internal pool.
+
+Initial AOS Decision (optional)
+- Purpose: Let the LLM choose initial operators (selection/crossover/mutation) and initial `cxpb/mutpb` before generation 1.
+- Enable (config): `config/algo_config.json` → `"aos": { "init_on_start": true }`
+- Enable (CLI): add `--aos-init` when running `feature_selection_ga.py`
+- Prompt: Reuses the v2 “choose_operators” prompt; the state text is an initial note (no charts), e.g. “Initial stage: please choose initial operators and cxpb/mutpb.”
+- Behavior:
+  - Applies the returned operators via the registry (binds to DEAP) and sets `cxpb/mutpb` before the first generation.
+  - With `aos.debug=true`, prints:
+    - `[AOS][INIT]` and `[AOS][REQUEST][INIT]` (messages)
+    - `[AOS][RESPONSE][INIT]` (raw JSON)
+    - `[AOS][APPLY][INIT]` (final applied operators/params and rates)
+  - With strict mode on (`aos.strict=true` or `--aos-strict`), failure exits; otherwise it falls back to default initial operators.
 
 Logging (evolution_log.csv)
 - Per-generation fields include:
@@ -156,9 +170,9 @@ Logging (evolution_log.csv)
   - Operator names: op_sel, op_cx, op_mut
   - Operator params (JSON string): op_sel_param, op_cx_param, op_mut_param
     - tournament: {"tournsize": k}
-    - uniform crossover: {"indpb": prob}
-    - flip_bit: {"indpb": prob}
-    - uniform_int: {"low": int, "up": int, "indpb": prob}
+    - uniform crossover: {"indpb": 0.5}
+    - flip_bit: {"indpb": 0.0333}
+    - uniform_int: {"low": int, "up": int, "indpb": 0.0333}
   - Rates: cxpb, mutpb
   - Switching: switch_interval, since_last_switch, switch_effective
 
@@ -206,20 +220,16 @@ Debugging & New Utilities
 - Final generation no switching
   - Switching is suppressed at `gen==generations` to avoid wasted work on the last generation.
 
-Prompt Format (v2) and Parameter Mapping
-- Decision JSON schema (must match operator pools):
+Prompt Format (v2)
+- Decision JSON schema (must match operator pools; uses DEAP parameter names):
   {
     "cxpb": 0.7,
     "mutpb": 0.3,
-    "Selection": {"name": "tournament", "parameter": {"k": 3}},
-    "Crossover": {"name": "uniform", "parameter": {"prob": 0.5}},
-    "Mutation": {"name": "flip_bit", "parameter": {"prob": 0.033}}
+    "Selection": {"name": "tournament", "parameter": {"tournsize": 3}},
+    "Crossover": {"name": "uniform", "parameter": {"indpb": 0.5}},
+    "Mutation": {"name": "flip_bit", "parameter": {"indpb": 0.033}}
   }
-- Binding to DEAP (prob → indpb):
-  - tournament(k) → selTournament(tournsize=k)
-  - uniform(prob) → cxUniform(indpb=prob)
-  - flip_bit(prob) → mutFlipBit(indpb=prob | 1/n_features if 0)
-  - uniform_int(prob, low, up) → mutUniformInt(low, up, indpb=prob | 1/n_features if 0)
+  - Binding uses DEAP names directly (no special mapping)
 
 Troubleshooting
 - Fixed vs Adaptive switching
@@ -247,5 +257,53 @@ Visualization
    - Encoding: bars colored green (positive), red (negative), gray (zero/NaN); includes a line overlay.
  - Operator success rates per generation:
    - The GA script auto-saves `ga_results/operator_success.png` (multi-line chart for `sr_cx` and `sr_mut`).
- - Overview:
+- Overview:
    - The GA script auto-saves `ga_results/overview.png`, a 2x2 dashboard combining Best Fitness, Diversity, IR, and Operator SR+Counts.
+Batch Runs (multiple datasets)
+- A helper script runs a small suite spanning few to many features (sklearn + synthetic CSV):
+  - python scripts/run_many.py --suite default --out ga_results/batch --seed 42 --generations 30 --pop-size 60 --op-switch-interval 10 --with-aos
+  - Synthetic datasets are generated under `ga_results/batch/_data/` with 100 and 500 features (binary classification).
+  - Each run writes into `ga_results/batch/<task>` and a combined `ga_results/batch/summary.csv` is produced.
+  - Pass `--extra-arg --aos-strict` to enforce strict AOS or other GA flags, e.g.:
+    - python scripts/run_many.py --with-aos --extra-arg --aos-strict --extra-arg --ema-alpha-ir 0.3
+
+- Config-driven batch (share the same algo/operator configs; vary only task_info):
+  1) Generate per-dataset config dirs by copying `operator_pools.json` and `algo_config.json` and writing dataset-specific `task_info.json`:
+     - python scripts/make_suite_configs.py --base config --out config_suites/fs_suite --sklearn iris wine breast_cancer --synth 100 500 1000
+  2) Run across all dataset config dirs and write outputs to `results/<dataset>`:
+     - Minimal (fully respect per-dataset configs):
+       python scripts/run_suite_configs.py --suite-dir config_suites/fs_suite --out-root results
+     - Optional overrides (only if you want to):
+       python scripts/run_suite_configs.py --suite-dir config_suites/fs_suite --out-root results --with-aos --aos-strict --seed 42 --generations 30 --pop-size 60 --op-switch-interval 5
+  3) AOS uses images from `<output>/images/overview.png` if set in `algo_config.json` → `paths.overview_image`. The code keeps `<output>/overview.png` and ensures a copy exists at the configured path for LLM.
+Single-dataset repeats (aggregate summary)
+- Run the same dataset multiple times and aggregate metrics:
+  - python scripts/run_repeats.py --config-dir config --out-root results/repeats_bc --repeats 3 --seed 42 --with-aos --aos-strict
+  - Outputs each run under `results/repeats_bc/run_i` and a `summary.csv` with:
+    - Avg_fitness, Avg_accuracy, Selected_num, Avg_max_fitness_step, Avg_diversity, Best_Fitness, Best_Accuracy
+
+Baselines (Feature Selection)
+- Methods included (selection returns an original feature subset; evaluation uses the same fitness):
+  - RFE-SVM: Recursive Feature Elimination with LinearSVC (estimator=LinearSVC(C=1.0, dual=false))
+  - LASSO: L1-penalized LogisticRegression via SelectFromModel (C grid)
+  - Chi-Squared Test: SelectKBest(chi2) with MinMaxScaler to ensure non-negative features
+  - Mutual Information: SelectKBest(mutual_info_classif)
+  - Random Forest Feature Importance: top-k by feature importances (n_estimators=400)
+  - PCA Loading Importance: unsupervised score per feature = sum_c |loading_{f,c}| * explained_variance_ratio[c]
+- Unified evaluation (same as GA/AOS GA):
+  - fitness = CV_mean - alpha * (k / d), where k is selected features, d is total features
+  - classifier pipeline when `--classifier svm`: StandardScaler + SVC(kernel="rbf", gamma="scale")
+  - k-grid: `auto` caps at floor(d * 0.5) by default; tie-break prefers fewer features when fitness is nearly equal
+
+- Single run (one dataset):
+  - python compare_baselines.py --sklearn-dataset breast_cancer --classifier svm --scoring accuracy --cv 5 --alpha 0.02 --seed 42 --output baseline_results/bc_run1
+  - Options:
+    - `--baselines rfe_svm,lasso,chi2,mi,rf_importance,pca` (default)
+    - `--k-grid 5,10,15` or `--k-max-frac 0.3` to control subset sizes
+    - `--C-grid 0.01,0.1,1,10` for LASSO grid
+    - `--include-ga` to append GA result into the same summary CSV
+
+- Repeats (aggregate over 3 runs):
+  - python scripts/run_baselines_repeats.py --sklearn-dataset breast_cancer --classifier svm --repeats 3 --seed 42 --out-root baseline_repeats/bc
+  - Produces per-run `baseline_summary.csv` and an aggregated `baseline_repeats/bc/summary.csv` with:
+    - Avg_fitness, Avg_accuracy, Selected_num, Avg_max_fitness_step (n/a for baselines), Avg_diversity (n/a), Best_fitness, Best_Accuracy

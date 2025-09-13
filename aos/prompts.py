@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 import base64
 import os
+import json
 
 
 def encode_image_b64(path: str) -> Optional[str]:
@@ -59,7 +60,7 @@ def build_decision_prompt(meta: Dict[str, Any], allowed_ops: Dict[str, Any], inc
     user_lines.append("[Recent Metrics]\n" + str(meta.get("recent_metrics", {})))
     user_lines.append(
         "Output strict JSON with keys: selection, crossover, mutation, params, cxpb, mutpb, rationale.\n"
-        "Where selection/crossover/mutation are operator names, params is a dict of operator-specific params; "
+        "Use DEAP parameter names exactly as listed in the allowed operators. "
         "cxpb/mutpb are floats in [0,1]."
     )
     content = "\n\n".join(user_lines)
@@ -125,8 +126,14 @@ def build_decision_prompt_v2(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     u.append("Directly output the complete JSON configuration in the format specified below.")
     u.append("")
     u.append("Required Output Format (use only names and parameters from the pools above):")
-    u.append("{" +
-             "\n  \"cxpb\": 0.7,\n  \"mutpb\": 0.3,\n  \"Selection\": {\"name\": \"tournament\", \"parameter\": {\"k\": 3}},\n  \"Crossover\": {\"name\": \"uniform\", \"parameter\": {\"prob\": 0.5}},\n  \"Mutation\": {\"name\": \"flip_bit\", \"parameter\": {\"prob\": 0.033}}\n}")
+    example = {
+        "cxpb": 0.7,
+        "mutpb": 0.3,
+        "Selection": {"name": "tournament", "parameter": {"tournsize": 3}},
+        "Crossover": {"name": "uniform", "parameter": {"indpb": 0.5}},
+        "Mutation": {"name": "flip_bit", "parameter": {"indpb": 0.033}},
+    }
+    u.append(json.dumps(example))
     content = "\n".join(u)
     return [{"role": "system", "content": sys}, {"role": "user", "content": content}]
 

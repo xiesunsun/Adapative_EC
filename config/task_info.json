@@ -5,7 +5,7 @@
   "csv": {"path": null, "target_col": null},
   "dataset_size": "n=569",
   "num_features": 30,
-  "classification_model": "logistic",
+  "classification_model": "svm",
   "scoring": "accuracy",
   "cv_folds": 5,
   "fitness_function": "CV_mean - alpha * (k/d)",

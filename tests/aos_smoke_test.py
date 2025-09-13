@@ -51,9 +51,9 @@ def main():
     llm_output = {
         "cxpb": 0.7,
         "mutpb": 0.3,
-        "Selection": {"name": "tournament", "parameter": {"k": 3}},
+        "Selection": {"name": "tournament", "parameter": {"tournsize": 3}},
         "Crossover": {"name": "one_point", "parameter": {}},
-        "Mutation": {"name": "bit_flip", "parameter": {"prob": 0.05}},
+        "Mutation": {"name": "bit_flip", "parameter": {"indpb": 0.05}},
         "rationale": "increase exploration with higher mutation"
     }
     norm, warn = validate_decision(llm_output)
@@ -65,7 +65,7 @@ def main():
     bad_dec = {
         "cxpb": 1.2,
         "mutpb": -0.1,
-        "Selection": {"name": "roulette", "parameter": {"k": 1}},
+        "Selection": {"name": "roulette", "parameter": {"tournsize": 1}},
         "Crossover": {"name": "unknown"},
         "Mutation": {"name": "shuffle_indexes"},
     }

@@ -24,10 +24,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, RFE
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, RFE, chi2
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectFromModel
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.svm import LinearSVC
+from sklearn.decomposition import PCA
 
 from feature_selection_ga import (
     load_dataset,
@@ -89,6 +92,25 @@ def baseline_kbest(X, y, k_grid: Sequence[int], score_fn: str) -> List[List[int]
     return masks
 
 
+def baseline_chi2_kbest(X, y, k_grid: Sequence[int]) -> List[List[int]]:
+    """Chi-squared test with SelectKBest. Requires non-negative features; scale to [0,1]."""
+    d = X.shape[1]
+    X_pos = MinMaxScaler().fit_transform(X)
+    masks: List[List[int]] = []
+    for k in k_grid:
+        if k < 1:
+            continue
+        k = min(k, d)
+        try:
+            selector = SelectKBest(score_func=chi2, k=k)
+            selector.fit(X_pos, y)
+            indices = np.argsort(selector.scores_)[-k:]
+        except Exception:
+            indices = []
+        masks.append(mask_from_indices(indices, d))
+    return masks
+
+
 def baseline_rf_topk(X, y, k_grid: Sequence[int], seed: Optional[int]) -> List[List[int]]:
     d = X.shape[1]
     rf = RandomForestClassifier(n_estimators=400, random_state=seed)
@@ -128,6 +150,54 @@ def baseline_l1_logistic(X, y, C_grid: Sequence[float], seed: Optional[int]) -> 
     return masks
 
 
+def baseline_rfe_svm(X, y, k_grid: Sequence[int], seed: Optional[int]) -> List[List[int]]:
+    d = X.shape[1]
+    masks: List[List[int]] = []
+    for k in k_grid:
+        if k < 1:
+            continue
+        k = min(k, d)
+        try:
+            est = LinearSVC(C=1.0, dual=False, max_iter=3000, random_state=seed)
+            rfe = RFE(estimator=est, n_features_to_select=k, step=1)
+            rfe.fit(X, y)
+            support = rfe.support_
+            indices = np.where(support)[0]
+        except Exception:
+            indices = []
+        masks.append(mask_from_indices(indices, d))
+    return masks
+
+
+def baseline_pca_importance(X, k_grid: Sequence[int]) -> List[List[int]]:
+    """Select top-k features by PCA loading importance (unsupervised).
+    Score per feature = sum_c |loading_{feature,c}| * explained_variance_ratio[c] over all components.
+    """
+    d = X.shape[1]
+    masks: List[List[int]] = []
+    try:
+        pca = PCA(n_components=min(d, X.shape[0]))
+        Xc = X - X.mean(axis=0, keepdims=True)
+        pca.fit(Xc)
+        loadings = pca.components_.T  # (d, n_comp)
+        weights = pca.explained_variance_ratio_
+        import numpy as _np
+        scores = _np.abs(loadings) * weights[None, :]
+        feat_score = scores.sum(axis=1)
+        order = _np.argsort(feat_score)
+    except Exception:
+        # Fallback to variance ranking
+        import numpy as _np
+        order = _np.argsort(X.var(axis=0))
+    for k in k_grid:
+        if k < 1:
+            continue
+        k = min(k, d)
+        idx = order[-k:]
+        masks.append(mask_from_indices(idx, d))
+    return masks
+
+
 def baseline_rfe(X, y, k_grid: Sequence[int], estimator) -> List[List[int]]:
     d = X.shape[1]
     masks: List[List[int]] = []
@@ -146,10 +216,21 @@ def baseline_rfe(X, y, k_grid: Sequence[int], estimator) -> List[List[int]]:
     return masks
 
 
-def default_k_grid(d: int) -> List[int]:
-    # 6 points roughly evenly spaced, up to all features
-    grid = sorted(set([1, max(2, d // 10), d // 5, d // 3, d // 2, d]))
-    return [k for k in grid if k >= 1]
+def default_k_grid(d: int, max_frac: float = 0.5) -> List[int]:
+    """Return a small grid of k values up to a fraction of d (default 50%).
+    Includes 1 and roughly spaced fractions; avoids k=d by default to reduce trivial select-all picks.
+    """
+    try:
+        mf = float(max_frac)
+    except Exception:
+        mf = 0.5
+    mf = 1.0 if mf > 1.0 else (0.0 if mf < 0.0 else mf)
+    max_k = max(1, int(round(d * mf)))
+    base = [1, max(2, d // 10), d // 5, d // 3, d // 2, d]
+    grid = sorted(set(k for k in base if 1 <= k <= max_k))
+    if max_k not in grid:
+        grid.append(max_k)
+    return sorted(set(grid))
 
 
 def main():
@@ -169,11 +250,12 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.02)
     ap.add_argument("--seed", type=int, default=None)
 
-    ap.add_argument("--baselines", type=str, default="all,random,kbest_f,kbest_mi,rf_topk,l1_logistic,lasso,rfe_logistic,rfe_rf",
-                    help="Comma-separated baselines to run")
+    ap.add_argument("--baselines", type=str, default="rfe_svm,lasso,chi2,mi,rf_importance,pca",
+                    help="Comma-separated baselines to run. Supported: rfe_svm, lasso, chi2, mi, rf_importance, pca")
     ap.add_argument("--random-iters", type=int, default=200)
     ap.add_argument("--init-prob", type=float, default=0.1)
     ap.add_argument("--k-grid", type=str, default="auto", help="Comma ints or 'auto'")
+    ap.add_argument("--k-max-frac", type=float, default=0.5, help="When k-grid='auto', cap k to floor(d*frac). Default 0.5")
     ap.add_argument("--C-grid", type=str, default="0.01,0.1,1,10")
 
     # Optionally include GA run for side-by-side comparison
@@ -200,7 +282,7 @@ def main():
     d = X.shape[1]
 
     if args.k_grid == "auto":
-        k_grid = default_k_grid(d)
+        k_grid = default_k_grid(d, max_frac=args.k_max_frac)
     else:
         k_grid = [int(x) for x in args.k_grid.split(",") if x.strip()]
 
@@ -215,49 +297,40 @@ def main():
         best_mask: Optional[List[int]] = None
         detail: Dict[str, object] = {"method": method}
 
-        if method == "all":
-            masks = [baseline_all(d)]
-            detail["params"] = {}
-        elif method == "random":
-            masks = baseline_random(d, args.random_iters, args.init_prob, args.seed)
-            detail["params"] = {"iters": args.random_iters, "init_prob": args.init_prob}
-        elif method == "kbest_f":
-            masks = baseline_kbest(X, y, k_grid, score_fn="f")
+        if method == "rfe_svm":
+            masks = baseline_rfe_svm(X, y, k_grid, args.seed)
+            detail["params"] = {"k_grid": k_grid, "estimator": "LinearSVC"}
+        elif method == "lasso":
+            masks = baseline_l1_logistic(X, y, C_grid, args.seed)
+            detail["params"] = {"C_grid": C_grid}
+        elif method == "chi2":
+            masks = baseline_chi2_kbest(X, y, k_grid)
             detail["params"] = {"k_grid": k_grid}
-        elif method == "kbest_mi":
+        elif method == "mi":
             masks = baseline_kbest(X, y, k_grid, score_fn="mi")
             detail["params"] = {"k_grid": k_grid}
-        elif method == "rf_topk":
+        elif method == "rf_importance":
             masks = baseline_rf_topk(X, y, k_grid, args.seed)
             detail["params"] = {"k_grid": k_grid}
-        elif method == "l1_logistic":
-            masks = baseline_l1_logistic(X, y, C_grid, args.seed)
-            detail["params"] = {"C_grid": C_grid}
-        elif method == "lasso":
-            # Alias for L1-penalized logistic as a LASSO-style sparse linear model for classification
-            masks = baseline_l1_logistic(X, y, C_grid, args.seed)
-            detail["params"] = {"C_grid": C_grid}
-        elif method == "rfe_logistic":
-            est = LogisticRegression(solver="liblinear", penalty="l2", max_iter=1000, random_state=args.seed)
-            masks = baseline_rfe(X, y, k_grid, est)
-            detail["params"] = {"k_grid": k_grid, "estimator": "logistic(l2)"}
-        elif method == "rfe_rf":
-            est = RandomForestClassifier(n_estimators=300, random_state=args.seed)
-            masks = baseline_rfe(X, y, k_grid, est)
-            detail["params"] = {"k_grid": k_grid, "estimator": "random_forest"}
+        elif method == "pca":
+            masks = baseline_pca_importance(X, k_grid)
+            detail["params"] = {"k_grid": k_grid}
         else:
             raise ValueError(f"Unknown baseline method: {method}")
 
-        # Evaluate all masks
+        # Evaluate all masks; tie-break by fewer features when fitness nearly equal
         best_cv_mean = float("nan")
         best_cv_std = float("nan")
+        best_k = d + 1
         for m in masks:
             fit, cv_mean, cv_std = eval_mask_with_scores(m, X, y, args.classifier, args.scoring, args.cv, args.alpha, args.seed)
-            if fit > best_fit:
+            k_now = int(sum(1 for b in m if b))
+            if (fit > best_fit + 1e-12) or (abs(fit - best_fit) <= 1e-12 and k_now < best_k):
                 best_fit = fit
                 best_cv_mean = cv_mean
                 best_cv_std = cv_std
                 best_mask = m
+                best_k = k_now
 
         if best_mask is None:
             best_mask = [0] * d

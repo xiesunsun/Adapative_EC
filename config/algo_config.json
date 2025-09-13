@@ -5,20 +5,20 @@
     "cv": 5,
     "alpha": 0.02,
     "scoring": "accuracy",
-    "classifier": "logistic",
+    "classifier": "svm",
     "sr_fair_cv": true
   },
   "operator_rates": {"cxpb": 0.6, "mutpb": 0.2},
   "operators": {
     "current": {
-      "selection": {"name": "tournament3", "params": {"tournsize": 3}},
+      "selection": {"name": "tournament", "params": {"tournsize": 3}},
       "crossover": {"name": "two_point", "params": {}},
       "mutation": {"name": "flip_bit", "params": {"indpb": "1/n_features"}}
     }
   },
   "switching": {
     "mode": "fixed", 
-    "interval": 20,
+    "interval": 10,
     "adaptive": {
       "enabled": true,
       "base_interval": 10,
@@ -36,11 +36,15 @@
     "enabled": true,
     "endpoint": "https://api.sunxie.xyz",
     "model": "gemini-2.5-pro",
+    "timeout": 180.0,
+    "max_retries": 5,
     "include_images": true,
-    "debug": true
+    "debug": true,
+    "strict": true,
+    "init_on_start": true
   },
   "paths": {
-    "overview_image": "ga_results/overview.png"
+    "overview_image": "images/overview.png"
   },
   "notes": "Adjust these defaults per dataset if needed."
 }

@@ -9,7 +9,7 @@ from .prompts import (
     build_state_prompt_v2,
     build_decision_prompt_v2,
 )
-from .schema import validate_decision, ALLOWED_SELECTION, ALLOWED_CROSSOVER, ALLOWED_MUTATION
+from .schema import validate_decision
 
 
 class AOSAdapter:
