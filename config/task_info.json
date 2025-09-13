@@ -1,0 +1,14 @@
+{
+  "dataset_name": "sklearn:breast_cancer",
+  "dataset_source": "sklearn",
+  "openml": {"name": null, "id": null, "version": null},
+  "csv": {"path": null, "target_col": null},
+  "dataset_size": "n=569",
+  "num_features": 30,
+  "classification_model": "logistic",
+  "scoring": "accuracy",
+  "cv_folds": 5,
+  "fitness_function": "CV_mean - alpha * (k/d)",
+  "alpha": 0.02,
+  "notes": "Breast cancer dataset from sklearn: 569 samples, 30 features, binary classes."
+}

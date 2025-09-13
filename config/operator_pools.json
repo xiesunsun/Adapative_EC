@@ -1,0 +1,66 @@
+{
+  "selection": [
+    {
+      "name": "tournament",
+      "aliases": ["tournament3", "tournament_k"],
+      "description": "Tournament selection with parameter k (tournament size). Balanced pressure.",
+      "params_schema": {
+        "k": {"type": "int", "min": 2, "max": 7, "default": 3, "description": "Tournament size (selection pressure)."}
+      }
+    },
+    {
+      "name": "sus",
+      "aliases": ["stochastic_universal_sampling", "SUS"],
+      "description": "Fitness-proportionate selection using SUS sampler.",
+      "params_schema": {}
+    },
+    {
+      "name": "best",
+      "aliases": ["selBest"],
+      "description": "Pick the best individuals; strong exploitation; may reduce diversity.",
+      "params_schema": {}
+    }
+  ],
+  "crossover": [
+    {
+      "name": "one_point",
+      "aliases": ["cxOnePoint", "onepoint"],
+      "description": "One-point crossover for binary masks.",
+      "params_schema": {}
+    },
+    {
+      "name": "two_point",
+      "aliases": ["cxTwoPoint", "twopoint"],
+      "description": "Two-point crossover preserving blocks.",
+      "params_schema": {}
+    },
+    {
+      "name": "uniform",
+      "aliases": ["cxUniform", "uniform_p"],
+      "description": "Uniform crossover; per-bit exchange probability prob in [0,1] (default 0.5).",
+      "params_schema": {
+        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "description": "Per-bit exchange probability."}
+      }
+    }
+  ],
+  "mutation": [
+    {
+      "name": "flip_bit",
+      "aliases": ["bit_flip", "mutFlipBit"],
+      "description": "Binary flip mutation; per-bit probability prob (default 1/n_features).",
+      "params_schema": {
+        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit flip probability; usually 1/n_features."}
+      }
+    },
+    {
+      "name": "uniform_int",
+      "aliases": ["mutUniformInt"],
+      "description": "Uniform integer mutation for {0,1}; per-bit probability prob.",
+      "params_schema": {
+        "prob": {"type": "float", "min": 0.0, "max": 1.0, "default": "1/n_features", "description": "Per-bit mutation probability."},
+        "low": {"type": "int", "default": 0, "description": "Lower bound (inclusive)."},
+        "up": {"type": "int", "default": 1, "description": "Upper bound (inclusive)."}
+      }
+    }
+  ]
+}
