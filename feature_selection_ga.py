@@ -522,6 +522,12 @@ def run_ga(
                         from aos.config_loader import build_state_payload_from_configs, build_decision_payload_from_configs
                         overview_path = aos_cfg.get("algo_config", {}).get("paths", {}).get("overview_image", os.path.join("ga_results", "overview.png"))
                         state_payload = build_state_payload_from_configs(aos_cfg, current_generation=gen, overview_image=overview_path)
+                        # Inject current dynamic rates (may be changed by previous decisions)
+                        try:
+                            state_payload["cxpb"] = cxpb
+                            state_payload["mutpb"] = mutpb
+                        except Exception:
+                            pass
                         print(f"[AOS] Switch at gen={gen} (interval={cur_interval}, adaptive_switching={adaptive_switch}, aos_enabled={bool(aos_adapter)})")
                         # Summarize state: print prompt and response when debug
                         try:

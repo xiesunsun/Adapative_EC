@@ -1,5 +1,5 @@
 {
-  "best_fitness": 0.9788461419034311,
+  "best_fitness": 0.9781950007762769,
   "selected_indices": [
     7,
     20,
@@ -8,7 +8,8 @@
     24,
     25,
     26,
-    28
+    28,
+    29
   ],
   "selected_features": [
     "mean concave points",
@@ -18,9 +19,10 @@
     "worst smoothness",
     "worst compactness",
     "worst concavity",
-    "worst symmetry"
+    "worst symmetry",
+    "worst fractal dimension"
   ],
-  "num_selected": 8,
+  "num_selected": 9,
   "total_features": 30,
   "scoring": "accuracy",
   "cv_folds": 5,
@@ -34,6 +36,6 @@
     0.9823008849557522
   ],
   "alpha": 0.02,
-  "penalty": 0.005333333333333333,
-  "selected_fraction": 0.26666666666666666
+  "penalty": 0.006,
+  "selected_fraction": 0.3
 }

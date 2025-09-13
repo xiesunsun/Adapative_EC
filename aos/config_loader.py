@@ -79,6 +79,7 @@ def build_decision_payload_from_configs(configs: Dict[str, Any], state_text: str
 def build_state_payload_from_configs(configs: Dict[str, Any], current_generation: int = 0, overview_image: str = "ga_results/overview.png") -> Dict[str, Any]:
     ti = configs.get("task_info", {})
     ac = configs.get("algo_config", {})
+    rates = ac.get("operator_rates", {})
     payload = {
         "current_generation": current_generation,
         "total_generations": ac.get("ga", {}).get("generations", ac.get("total_iterations")),
@@ -86,5 +87,7 @@ def build_state_payload_from_configs(configs: Dict[str, Any], current_generation
         "algorithm_configuration": ac.get("operators", {}).get("current", {}),
         "fitness_function": ti.get("fitness_function"),
         "algorithm_state_pic": overview_image or ac.get("paths", {}).get("overview_image", "ga_results/overview.png"),
+        "cxpb": rates.get("cxpb"),
+        "mutpb": rates.get("mutpb"),
     }
     return payload
