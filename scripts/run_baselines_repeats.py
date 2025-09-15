@@ -63,6 +63,9 @@ def run_once(args: argparse.Namespace, run_idx: int, seed: int) -> int:
         cmd += ["--data-home", args.data_home]
     if args.k_grid:
         cmd += ["--k-grid", args.k_grid]
+    # Optional: cap auto k-grid by fraction of features
+    if getattr(args, "k_max_frac", None) is not None:
+        cmd += ["--k-max-frac", str(args.k_max_frac)]
     if args.C_grid:
         cmd += ["--C-grid", args.C_grid]
     if args.baselines:
@@ -129,6 +132,7 @@ def main():
     # baselines config (align with compare_baselines.py defaults)
     ap.add_argument("--baselines", type=str, default="rfe_svm,lasso,chi2,mi,rf_importance,pca")
     ap.add_argument("--k-grid", type=str, default="auto")
+    ap.add_argument("--k-max-frac", type=float, default=None, help="When k-grid='auto', cap k to floor(d*frac)")
     ap.add_argument("--C-grid", type=str, default="0.01,0.1,1,10")
     # repeats
     ap.add_argument("--repeats", type=int, default=3)
