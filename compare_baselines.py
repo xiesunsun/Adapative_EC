@@ -21,6 +21,8 @@ import json
 import os
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
+from multiprocessing import Pool
+import os as _os
 
 import numpy as np
 import pandas as pd
@@ -42,12 +44,47 @@ from feature_selection_ga import (
 )
 
 
-def eval_mask_with_scores(mask: List[int], X, y, clf_name: str, scoring: str, cv: int, alpha: float, seed: Optional[int]) -> Tuple[float, float, float]:
+def eval_mask_with_scores(mask: List[int], X, y, clf_name: str, scoring: str, cv: int, alpha: float, seed: Optional[int], n_jobs_eval: int = 1) -> Tuple[float, float, float]:
     """Return (fitness, cv_mean, cv_std) for a mask."""
     rng_np = np.random.RandomState(seed if seed is not None else None)
     clf = make_classifier(clf_name)
-    (fit,) = evaluate_individual(mask, X, y, clf, scoring, cv, alpha, rng_np)
+    (fit,) = evaluate_individual(mask, X, y, clf, scoring, cv, alpha, rng_np, n_jobs_eval)
     cv_mean, cv_std, _folds = cv_scores_for_mask(mask, X, y, clf, scoring, cv, seed)
+    return float(fit), float(cv_mean), float(cv_std)
+
+
+# -----------------------------
+# Parallel evaluation helpers
+# -----------------------------
+_BCTX: Dict[str, object] = {}
+
+def _init_bctx(ctx: Dict[str, object]) -> None:
+    global _BCTX
+    _BCTX = dict(ctx)
+    _BCTX["clf"] = make_classifier(str(ctx.get("clf_name", "logistic")))
+
+def _seed_from_mask(mask: List[int], base_seed: int) -> int:
+    h = 0
+    for b in mask:
+        h = ((h << 1) ^ int(b)) & 0x7fffffff
+    return int((base_seed * 1315423911) ^ h) & 0x7fffffff
+
+def _eval_mask_picklable(mask: List[int]) -> Tuple[float, float, float]:
+    global _BCTX
+    X = _BCTX["X"]  # type: ignore
+    y = _BCTX["y"]  # type: ignore
+    scoring = str(_BCTX.get("scoring", "accuracy"))
+    cv = int(_BCTX.get("cv", 5))
+    alpha = float(_BCTX.get("alpha", 0.0))
+    n_jobs_eval = int(_BCTX.get("n_jobs_eval", 1))
+    clf = _BCTX.get("clf")
+    if clf is None:
+        clf = make_classifier(str(_BCTX.get("clf_name", "logistic")))
+    base_seed = int(_BCTX.get("base_seed", 0))
+    seed = _seed_from_mask(mask, base_seed)
+    rng_np = np.random.RandomState(seed)
+    (fit,) = evaluate_individual(mask, X, y, clf, scoring, cv, alpha, rng_np, n_jobs_eval)  # type: ignore
+    cv_mean, cv_std, _ = cv_scores_for_mask(mask, X, y, clf, scoring, cv, base_seed)  # type: ignore
     return float(fit), float(cv_mean), float(cv_std)
 
 
@@ -266,6 +303,9 @@ def main():
     ap.add_argument("--mutpb", type=float, default=0.2)
 
     ap.add_argument("--output", type=str, default="baseline_results")
+    # Parallel options
+    ap.add_argument("--n-procs", type=int, default=1, help="Processes for evaluating masks in parallel")
+    ap.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs used inside cross_val_score for each evaluation")
     args = ap.parse_args()
 
     data = load_dataset(
@@ -291,6 +331,23 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
     rows: List[Dict] = []
+
+    # Optional process pool for evaluating masks
+    pool: Optional[Pool] = None
+    use_pool = int(args.n_procs) > 1
+    if use_pool:
+        ctx = {
+            "X": X,
+            "y": y,
+            "scoring": args.scoring,
+            "cv": int(args.cv),
+            "alpha": float(args.alpha),
+            "n_jobs_eval": int(args.eval_n_jobs),
+            "clf_name": args.classifier,
+            "base_seed": int(args.seed if args.seed is not None else 0),
+        }
+        pool = Pool(processes=int(args.n_procs), initializer=_init_bctx, initargs=(ctx,))
+        print(f"[PARALLEL] Baseline eval with n_procs={args.n_procs}, eval_n_jobs={args.eval_n_jobs}")
 
     for method in methods:
         best_fit = -1e12
@@ -322,15 +379,22 @@ def main():
         best_cv_mean = float("nan")
         best_cv_std = float("nan")
         best_k = d + 1
-        for m in masks:
-            fit, cv_mean, cv_std = eval_mask_with_scores(m, X, y, args.classifier, args.scoring, args.cv, args.alpha, args.seed)
-            k_now = int(sum(1 for b in m if b))
-            if (fit > best_fit + 1e-12) or (abs(fit - best_fit) <= 1e-12 and k_now < best_k):
-                best_fit = fit
-                best_cv_mean = cv_mean
-                best_cv_std = cv_std
-                best_mask = m
-                best_k = k_now
+        if masks:
+            if use_pool and pool is not None:
+                results = pool.map(_eval_mask_picklable, masks)
+            else:
+                results = [
+                    eval_mask_with_scores(m, X, y, args.classifier, args.scoring, args.cv, args.alpha, args.seed, args.eval_n_jobs)
+                    for m in masks
+                ]
+            for m, (fit, cv_mean, cv_std) in zip(masks, results):
+                k_now = int(sum(1 for b in m if b))
+                if (fit > best_fit + 1e-12) or (abs(fit - best_fit) <= 1e-12 and k_now < best_k):
+                    best_fit = fit
+                    best_cv_mean = cv_mean
+                    best_cv_std = cv_std
+                    best_mask = m
+                    best_k = k_now
 
         if best_mask is None:
             best_mask = [0] * d
@@ -363,6 +427,12 @@ def main():
                 "params": detail.get("params", {}),
             }, f, indent=2)
 
+    # Clean up pool
+    if use_pool and pool is not None:
+        try:
+            pool.close(); pool.join()
+        except Exception:
+            pass
     df = pd.DataFrame(rows)
     df.sort_values(by="best_fitness", ascending=False, inplace=True)
     df.to_csv(os.path.join(args.output, "baseline_summary.csv"), index=False)
