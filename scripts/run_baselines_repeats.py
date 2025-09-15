@@ -34,6 +34,11 @@ from typing import List
 import concurrent.futures as _fut
 
 import pandas as pd
+try:
+    # Optional: read GA defaults (alpha/scoring/cv/classifier) from config
+    from aos.config_loader import load_configs as _load_configs
+except Exception:  # pragma: no cover
+    _load_configs = None  # type: ignore
 
 
 def run_once(args: argparse.Namespace, run_idx: int, seed: int) -> int:
@@ -128,6 +133,8 @@ def aggregate(out_root: str, repeats: int, summary_name: str = "summary.csv") ->
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--use-config", action="store_true", help="Load defaults (alpha/scoring/cv/classifier) from config/algo_config.json")
+    ap.add_argument("--config-dir", type=str, default="config", help="Config directory (reads algo_config.json when --use-config)")
     # dataset sources (choose one)
     ap.add_argument("--sklearn-dataset", type=str, default=None)
     ap.add_argument("--csv", type=str, default=None)
@@ -158,6 +165,32 @@ def main():
     ap.add_argument("--rfe-step", type=int, default=None, help="Override RFE step for rfe_svm in compare_baselines")
     ap.add_argument("--rf-estimators", type=int, default=None, help="Override n_estimators for rf_importance in compare_baselines")
     args = ap.parse_args()
+
+    # Optionally override evaluation defaults from config when requested
+    if args.use_config and _load_configs is not None:
+        try:
+            cfgs = _load_configs(args.config_dir)
+            ac = cfgs.get("algo_config", {}) if isinstance(cfgs, dict) else {}
+            ga = ac.get("ga", {}) if isinstance(ac, dict) else {}
+            if ga:
+                # Always override when --use-config is provided, to keep baselines aligned with GA
+                if ga.get("classifier"):
+                    args.classifier = ga.get("classifier")
+                if ga.get("scoring"):
+                    args.scoring = ga.get("scoring")
+                if ga.get("cv") is not None:
+                    try:
+                        args.cv = int(ga.get("cv", args.cv))
+                    except Exception:
+                        pass
+                if ga.get("alpha") is not None:
+                    try:
+                        args.alpha = float(ga.get("alpha", args.alpha))
+                    except Exception:
+                        pass
+                print(f"[CONFIG] Overriding from {args.config_dir}/algo_config.json -> classifier={args.classifier}, scoring={args.scoring}, cv={args.cv}, alpha={args.alpha}")
+        except Exception as _e:  # pragma: no cover
+            print(f"[WARN] Failed to load config defaults: {_e}")
 
     os.makedirs(args.out_root, exist_ok=True)
 
