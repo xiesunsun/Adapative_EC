@@ -1,12 +1,14 @@
 {
   "ga": {
     "pop_size": 50,
-    "generations": 10,
+    "generations": 100,
     "cv": 5,
     "alpha": 0.02,
     "scoring": "accuracy",
     "classifier": "svm",
-    "sr_fair_cv": true
+    "n_procs": 3,
+    "eval_n_jobs": 1,
+    "sr_fair_cv": false
   },
   "operator_rates": {"cxpb": 0.6, "mutpb": 0.2},
   "operators": {

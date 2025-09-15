@@ -29,6 +29,50 @@ from sklearn.svm import SVC
 from typing import Any, Dict
 from datetime import datetime, timezone
 
+# --- Global worker evaluation context for multiprocessing ---
+_EVAL_CTX: Dict[str, Any] = {}
+
+def _init_eval_worker(ctx: Dict[str, Any]) -> None:
+    """Initializer for worker processes: build per-worker classifier and store context.
+    Avoids pickling large objects per task and re-creating the classifier each call.
+    """
+    global _EVAL_CTX
+    # Build classifier once per worker
+    try:
+        local = dict(ctx)
+        local["clf"] = make_classifier(ctx["classifier"])  # type: ignore
+        _EVAL_CTX = local
+    except Exception:
+        _EVAL_CTX = dict(ctx)
+
+def _seed_from_individual(ind: List[int], base_seed: int) -> int:
+    # Stable seed derived from base_seed and the individual's bit pattern
+    try:
+        h = 0
+        for b in ind:
+            h = ((h << 1) ^ int(b)) & 0x7fffffff
+        return int((base_seed * 1315423911) ^ h) & 0x7fffffff
+    except Exception:
+        return int(base_seed) & 0x7fffffff
+
+def _evaluate_individual_picklable(individual: List[int]) -> Tuple[float]:
+    """Picklable evaluate function that reads data from the global worker context."""
+    global _EVAL_CTX
+    X = _EVAL_CTX.get("X")
+    y = _EVAL_CTX.get("y")
+    scoring = _EVAL_CTX.get("scoring", "accuracy")
+    cv = int(_EVAL_CTX.get("cv", 5))
+    alpha = float(_EVAL_CTX.get("alpha", 0.0))
+    n_jobs_eval = int(_EVAL_CTX.get("n_jobs_eval", 1))
+    # Prefer per-worker prebuilt classifier; fallback to building one
+    clf = _EVAL_CTX.get("clf")
+    if clf is None:
+        clf = make_classifier(_EVAL_CTX.get("classifier", "logistic"))
+    base_seed = int(_EVAL_CTX.get("base_seed", 0))
+    # Derive a deterministic RNG for CV splitter from individual bits
+    rng = np.random.RandomState(_seed_from_individual(individual, base_seed))
+    return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng, n_jobs_eval)
+
 # Optional AOS imports (LLM-driven adaptive operator selection)
 try:
     from aos.adapter import AOSAdapter
@@ -324,10 +368,9 @@ def run_ga(
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
     clf = make_classifier(classifier)
-
+    # Default (serial) evaluation function
     def eval_wrapper(individual: List[int]):
         return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng_np, n_jobs_eval)
-
     toolbox.register("evaluate", eval_wrapper)
     toolbox.register("mate", tools.cxTwoPoint)
     toolbox.register("mutate", tools.mutFlipBit, indpb=1.0 / n_features)
@@ -339,9 +382,23 @@ def run_ga(
     if n_procs and int(n_procs) > 1:
         try:
             import multiprocessing as _mp
-            pool = _mp.Pool(processes=int(n_procs))
+            # Initialize worker context with data and settings; build classifier per worker in initializer
+            worker_ctx = {
+                "X": X,
+                "y": y,
+                "scoring": scoring,
+                "cv": int(cv),
+                "alpha": float(alpha),
+                "n_jobs_eval": int(n_jobs_eval),
+                "classifier": classifier,
+                "base_seed": int(seed if seed is not None else 0),
+            }
+            pool = _mp.Pool(processes=int(n_procs), initializer=_init_eval_worker, initargs=(worker_ctx,))
             toolbox.unregister("map")
             toolbox.register("map", pool.map)
+            # Use picklable evaluate bound to worker context
+            toolbox.unregister("evaluate")
+            toolbox.register("evaluate", _evaluate_individual_picklable)
             print(f"[PARALLEL] Enabled with n_procs={n_procs}; eval n_jobs={n_jobs_eval}")
         except Exception as _e:
             print(f"[PARALLEL] Failed to start pool ({_e}); falling back to serial map")
