@@ -1933,10 +1933,10 @@ def main():
         aos_init=aos_init,
     )
 
-    # Compute unpenalized downstream metric for the best mask
-    clf = make_classifier(args.classifier)
+    # Compute unpenalized downstream metric for the best mask using the SAME scoring used in GA
+    clf = make_classifier(classifier)
     cv_mean, cv_std, fold_scores = cv_scores_for_mask(
-        best_mask, data.X, data.y, clf, args.scoring, args.cv, args.seed
+        best_mask, data.X, data.y, clf, scoring, cv, args.seed
     )
 
     # Augment best_solution.json with downstream metrics and penalty components
@@ -1948,13 +1948,13 @@ def main():
         best_data = json.load(f)
     selected_frac = best_data["num_selected"] / max(1, best_data["total_features"])
     best_data.update({
-        "scoring": args.scoring,
-        "cv_folds": args.cv,
+        "scoring": scoring,
+        "cv_folds": cv,
         "cv_mean": cv_mean,
         "cv_std": cv_std,
         "cv_fold_scores": fold_scores,
-        "alpha": args.alpha,
-        "penalty": args.alpha * selected_frac,
+        "alpha": alpha,
+        "penalty": alpha * selected_frac,
         "selected_fraction": selected_frac,
     })
     with open(best_json_path, "w") as f:
@@ -1970,7 +1970,7 @@ def main():
     selected_count = sum(best_mask)
     print(f"Best fitness (penalized): {best_fit:.4f}")
     if cv_mean == cv_mean:  # check not NaN
-        print(f"Downstream {args.scoring}: mean={cv_mean:.4f}, std={cv_std:.4f}")
+        print(f"Downstream {scoring}: mean={cv_mean:.4f}, std={cv_std:.4f}")
     print(f"Selected {selected_count}/{len(best_mask)} features. Results saved to '{args.output}'.")
 
 

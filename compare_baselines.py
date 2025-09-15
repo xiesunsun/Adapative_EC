@@ -27,7 +27,7 @@ import time
 
 import numpy as np
 import pandas as pd
-from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, RFE, chi2
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, RFE, chi2 as _chi2
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectFromModel
@@ -111,22 +111,23 @@ def baseline_random(d: int, iters: int, init_prob: float, seed: Optional[int]) -
     return masks
 
 
-def baseline_kbest(X, y, k_grid: Sequence[int], score_fn: str) -> List[List[int]]:
+def baseline_kbest(X, y, k_grid: Sequence[int], score_fn: str, seed: Optional[int] = None) -> List[List[int]]:
+    """Compute univariate scores once and reuse for all k to avoid redundant work."""
     d = X.shape[1]
     masks: List[List[int]] = []
+    if score_fn == "f":
+        scores, _p = f_classif(X, y)
+    elif score_fn == "mi":
+        scores = mutual_info_classif(X, y, random_state=seed)
+    else:
+        raise ValueError("score_fn must be 'f' or 'mi'")
+    order = np.argsort(scores)
     for k in k_grid:
         if k < 1:
             continue
         k = min(k, d)
-        if score_fn == "f":
-            selector = SelectKBest(score_func=f_classif, k=k)
-        elif score_fn == "mi":
-            selector = SelectKBest(score_func=mutual_info_classif, k=k)
-        else:
-            raise ValueError("score_fn must be 'f' or 'mi'")
-        selector.fit(X, y)
-        indices = np.argsort(selector.scores_)[-k:]
-        masks.append(mask_from_indices(indices, d))
+        idx = order[-k:]
+        masks.append(mask_from_indices(idx, d))
     return masks
 
 
@@ -135,17 +136,17 @@ def baseline_chi2_kbest(X, y, k_grid: Sequence[int]) -> List[List[int]]:
     d = X.shape[1]
     X_pos = MinMaxScaler().fit_transform(X)
     masks: List[List[int]] = []
+    try:
+        scores, _p = _chi2(X_pos, y)
+        order = np.argsort(scores)
+    except Exception:
+        order = np.arange(d)
     for k in k_grid:
         if k < 1:
             continue
         k = min(k, d)
-        try:
-            selector = SelectKBest(score_func=chi2, k=k)
-            selector.fit(X_pos, y)
-            indices = np.argsort(selector.scores_)[-k:]
-        except Exception:
-            indices = []
-        masks.append(mask_from_indices(indices, d))
+        idx = order[-k:]
+        masks.append(mask_from_indices(idx, d))
     return masks
 
 
@@ -324,7 +325,7 @@ def main():
 
     X, y, feat_names = data.X, data.y, [str(n) for n in data.feature_names]
     d = X.shape[1]
-    print(f"[DATA] Loaded dataset: X.shape={X.shape}, y.shape={y.shape}")
+    print(f"[DATA] Loaded dataset: X.shape={X.shape}, y.shape={y.shape}", flush=True)
     d = X.shape[1]
 
     if args.k_grid == "auto":
@@ -361,17 +362,19 @@ def main():
         detail: Dict[str, object] = {"method": method}
 
         t_gen = time.time()
+        print(f"[START] {method}: preparing masks...", flush=True)
         if method == "rfe_svm":
             masks = baseline_rfe_svm(X, y, k_grid, args.seed, step=args.rfe_step)
             detail["params"] = {"k_grid": k_grid, "estimator": "LinearSVC"}
         elif method == "lasso":
+            print(f"[INFO] lasso: fitting C-grid {C_grid} (this can take a while)...", flush=True)
             masks = baseline_l1_logistic(X, y, C_grid, args.seed)
             detail["params"] = {"C_grid": C_grid}
         elif method == "chi2":
             masks = baseline_chi2_kbest(X, y, k_grid)
             detail["params"] = {"k_grid": k_grid}
         elif method == "mi":
-            masks = baseline_kbest(X, y, k_grid, score_fn="mi")
+            masks = baseline_kbest(X, y, k_grid, score_fn="mi", seed=args.seed)
             detail["params"] = {"k_grid": k_grid}
         elif method == "rf_importance":
             masks = baseline_rf_topk(X, y, k_grid, args.seed, n_estimators=args.rf_estimators)
@@ -381,7 +384,7 @@ def main():
             detail["params"] = {"k_grid": k_grid}
         else:
             raise ValueError(f"Unknown baseline method: {method}")
-        print(f"[BASELINE] {method}: generated {len(masks)} masks in {time.time()-t_gen:.2f}s; evaluating...")
+        print(f"[BASELINE] {method}: generated {len(masks)} masks in {time.time()-t_gen:.2f}s; evaluating...", flush=True)
 
         # Evaluate all masks; tie-break by fewer features when fitness nearly equal
         best_cv_mean = float("nan")
@@ -414,7 +417,7 @@ def main():
                     elapsed = time.time() - t0
                     rate = processed / max(elapsed, 1e-6)
                     eta = (total - processed) / max(rate, 1e-6)
-                    print(f"[PROGRESS] {method}: {processed}/{total} masks, {elapsed:.1f}s elapsed, ETA ~{eta:.1f}s")
+                    print(f"[PROGRESS] {method}: {processed}/{total} masks, {elapsed:.1f}s elapsed, ETA ~{eta:.1f}s", flush=True)
 
         if best_mask is None:
             best_mask = [0] * d
