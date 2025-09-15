@@ -23,6 +23,36 @@ Quick Start
       python feature_selection_ga.py --openml-id 1461 --classifier rf --cv 5 --alpha 0.02
     - Optional cache directory for downloads: add --data-home .openml_cache
 
+5) Enable parallel evaluation (faster on multi-core)
+   - CLI flags:
+     - --n-procs N: DEAP worker processes for evaluating individuals
+     - --eval-n-jobs M: sklearn cross_val_score parallelism inside each evaluation (keep 1 when --n-procs>1)
+   - Example:
+     python feature_selection_ga.py --openml-id 1485 --classifier svm --cv 5 --alpha 0.02 \
+       --pop-size 80 --generations 50 --seed 41 --n-procs 8 --eval-n-jobs 1 --data-home .openml_cache
+   - Tip: to avoid oversubscription, set environment variables:
+     OMP_NUM_THREADS=1  and  MKL_NUM_THREADS=1
+
+6) Drive runs entirely via config (no long CLI)
+   - config/task_info.json (dataset):
+     {
+       "dataset_source": "openml",
+       "openml": {"id": 1485, "version": 1}
+     }
+   - config/algo_config.json (GA + parallel):
+     {
+       "ga": {
+         "pop_size": 80, "generations": 50, "cv": 5, "alpha": 0.02,
+         "scoring": "accuracy", "classifier": "svm",
+         "n_procs": 8, "eval_n_jobs": 1
+       }
+     }
+   - Run:
+     python feature_selection_ga.py --use-config --seed 41 --data-home .openml_cache
+   - After loading the dataset, the script prints a confirmation like:
+     [DATA] Loaded OpenML dataset (id=1485) with X.shape=(2000, 500), y.shape=(2000,)
+     [DATA] OpenML cache dir: .openml_cache
+
 Inputs
 - CSV mode: Provide --csv path and --target-col name. All other columns are treated as features.
 - Built-in datasets: --sklearn-dataset breast_cancer|iris|wine.
@@ -50,6 +80,8 @@ Notes
 - Empty selections are repaired by forcing at least one feature on.
 - For linear/Kernel methods, data is scaled via StandardScaler in a Pipeline.
 - If a subset causes the model to fail, a large negative fitness is applied.
+- OpenML caching: pass --data-home <dir> to cache downloads locally. The loader prints a [DATA] line with shapes once the dataset is ready.
+- Parallelism: prefer process-level parallelism (--n-procs) and keep sklearn evals single-threaded (--eval-n-jobs 1). Consider OMP_NUM_THREADS=1 and MKL_NUM_THREADS=1.
 
 Visualization Metrics
 - Population Diversity (Hamming): For a population of size N and bit-length L, we compute

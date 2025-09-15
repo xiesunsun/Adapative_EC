@@ -96,6 +96,11 @@ def load_dataset(
     if openml_name or openml_id:
         # Fetch from OpenML (requires network). Uses sklearn's cache if data_home provided.
         fetch_kwargs = {"as_frame": True}
+        # Silence sklearn fetch_openml future warning by using the new default explicitly
+        try:
+            fetch_kwargs["parser"] = "auto"
+        except Exception:
+            pass
         if data_home:
             fetch_kwargs["data_home"] = data_home
         if openml_version is not None:
@@ -1672,6 +1677,10 @@ def main():
                 openml_version=None,
                 data_home=None,
             )
+            try:
+                print(f"[DATA] Loaded sklearn dataset '{ds}' with X.shape={data.X.shape}, y.shape={data.y.shape}")
+            except Exception:
+                pass
         elif ds_source == "openml":
             oname = openml_info.get("name")
             oid = openml_info.get("id")
@@ -1684,6 +1693,13 @@ def main():
                 openml_version=openml_info.get("version"),
                 data_home=args.data_home,
             )
+            try:
+                src = f"name='{oname}'" if oname else f"id={oid}"
+                print(f"[DATA] Loaded OpenML dataset ({src}) with X.shape={data.X.shape}, y.shape={data.y.shape}")
+                if args.data_home:
+                    print(f"[DATA] OpenML cache dir: {args.data_home}")
+            except Exception:
+                pass
         elif ds_source == "csv":
             data = load_dataset(
                 csv=csv_info.get("path"),
@@ -1694,6 +1710,10 @@ def main():
                 openml_version=None,
                 data_home=None,
             )
+            try:
+                print(f"[DATA] Loaded CSV dataset from '{csv_info.get('path')}' with X.shape={data.X.shape}, y.shape={data.y.shape}")
+            except Exception:
+                pass
         else:
             raise ValueError("Config dataset_source invalid or unsupported")
     else:
@@ -1708,6 +1728,18 @@ def main():
             openml_version=args.openml_version,
             data_home=args.data_home,
         )
+        try:
+            if args.openml_id or args.openml_name:
+                src = f"id={args.openml_id}" if args.openml_id else f"name='{args.openml_name}'"
+                print(f"[DATA] Loaded OpenML dataset ({src}) with X.shape={data.X.shape}, y.shape={data.y.shape}")
+                if args.data_home:
+                    print(f"[DATA] OpenML cache dir: {args.data_home}")
+            elif args.sklearn_dataset:
+                print(f"[DATA] Loaded sklearn dataset '{args.sklearn_dataset}' with X.shape={data.X.shape}, y.shape={data.y.shape}")
+            elif args.csv:
+                print(f"[DATA] Loaded CSV dataset from '{args.csv}' with X.shape={data.X.shape}, y.shape={data.y.shape}")
+        except Exception:
+            pass
 
     # Resolve runtime settings (either from config or CLI)
     aos_api_key = os.environ.get(args.aos_api_key_env, "")
@@ -1719,6 +1751,9 @@ def main():
     classifier = args.classifier
     cxpb = args.cxpb
     mutpb = args.mutpb
+    # Parallelism defaults; may be overridden by config later
+    n_procs = args.n_procs
+    eval_n_jobs = args.eval_n_jobs
     sr_fair_cv = args.sr_fair_cv
     op_switch_interval = args.op_switch_interval
     disable_op_switch = args.disable_op_switch
@@ -1752,6 +1787,14 @@ def main():
         scoring = ga.get("scoring", scoring)
         classifier = ga.get("classifier", classifier)
         sr_fair_cv = bool(ga.get("sr_fair_cv", sr_fair_cv))
+        try:
+            n_procs = int(ga.get("n_procs", args.n_procs))
+        except Exception:
+            n_procs = args.n_procs
+        try:
+            eval_n_jobs = int(ga.get("eval_n_jobs", args.eval_n_jobs))
+        except Exception:
+            eval_n_jobs = args.eval_n_jobs
         rates = ac.get("operator_rates", {})
         cxpb = float(rates.get("cxpb", cxpb))
         mutpb = float(rates.get("mutpb", mutpb))
@@ -1805,8 +1848,8 @@ def main():
         mutpb=mutpb,
         init_prob=args.init_prob,
         seed=args.seed,
-        n_procs=args.n_procs,
-        n_jobs_eval=args.eval_n_jobs,
+        n_procs=n_procs,
+        n_jobs_eval=eval_n_jobs,
         op_switch_interval=op_switch_interval,
         disable_op_switch=disable_op_switch,
         sr_fair_cv=sr_fair_cv,
