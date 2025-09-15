@@ -67,11 +67,6 @@ def run_once(args: argparse.Namespace, run_idx: int, seed: int) -> int:
     # Optional: cap auto k-grid by fraction of features
     if getattr(args, "k_max_frac", None) is not None:
         cmd += ["--k-max-frac", str(args.k_max_frac)]
-    # Forward parallel options to compare_baselines if present
-    if hasattr(args, "n_procs") and args.n_procs:
-        cmd += ["--n-procs", str(args.n_procs)]
-    if hasattr(args, "eval_n_jobs") and args.eval_n_jobs is not None:
-        cmd += ["--eval-n-jobs", str(args.eval_n_jobs)]
     if args.C_grid:
         cmd += ["--C-grid", args.C_grid]
     if args.baselines:
@@ -155,9 +150,6 @@ def main():
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42, help="base seed; repeat i uses seed+i")
     ap.add_argument("--concurrency", type=int, default=1, help="Run up to N repeats in parallel")
-    # parallel options for compare_baselines
-    ap.add_argument("--n-procs", type=int, default=1, help="Processes for mask evaluation in compare_baselines")
-    ap.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs inside cross_val_score in compare_baselines")
     # output
     ap.add_argument("--out-root", type=str, default="baseline_repeats/bc")
     # parallel options for compare_baselines
