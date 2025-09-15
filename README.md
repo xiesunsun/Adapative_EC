@@ -53,6 +53,11 @@ Quick Start
      [DATA] Loaded OpenML dataset (id=1485) with X.shape=(2000, 500), y.shape=(2000,)
      [DATA] OpenML cache dir: .openml_cache
 
+7) Deterministic CV and repeated CV (reduce variance)
+   - Fixed CV during GA evaluation (deterministic across runs): add `--fixed-cv` (or set `ga.fixed_cv: true` in config).
+   - Repeated CV to stabilize small datasets: add `--cv-repeats K` with `--fixed-cv` to use `RepeatedStratifiedKFold` (e.g., K=3).
+   - Downstream report uses the same scoring and CV settings as GA, so when `alpha=0`, best fitness ≈ downstream mean.
+
 Inputs
 - CSV mode: Provide --csv path and --target-col name. All other columns are treated as features.
 - Built-in datasets: --sklearn-dataset breast_cancer|iris|wine.
@@ -82,6 +87,7 @@ Notes
 - If a subset causes the model to fail, a large negative fitness is applied.
 - OpenML caching: pass --data-home <dir> to cache downloads locally. The loader prints a [DATA] line with shapes once the dataset is ready.
 - Parallelism: prefer process-level parallelism (--n-procs) and keep sklearn evals single-threaded (--eval-n-jobs 1). Consider OMP_NUM_THREADS=1 and MKL_NUM_THREADS=1.
+- CV control: use `--fixed-cv` to keep GA and downstream on the same folds; add `--cv-repeats` to average multiple seeded splits (slower, less variance).
 
 Visualization Metrics
 - Population Diversity (Hamming): For a population of size N and bit-length L, we compute

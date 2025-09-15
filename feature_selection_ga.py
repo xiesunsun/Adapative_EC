@@ -20,13 +20,13 @@ import numpy as np
 import pandas as pd
 from deap import algorithms, base, creator, tools
 from sklearn.datasets import load_breast_cancer, load_iris, load_wine, fetch_openml
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, StratifiedKFold, RepeatedStratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
-from typing import Any, Dict
+from typing import Any, Dict, Union
 from datetime import datetime, timezone
 
 # --- Global worker evaluation context for multiprocessing ---
@@ -41,6 +41,18 @@ def _init_eval_worker(ctx: Dict[str, Any]) -> None:
     try:
         local = dict(ctx)
         local["clf"] = make_classifier(ctx["classifier"])  # type: ignore
+        # Build fixed CV splitter if requested
+        try:
+            if bool(local.get("fixed_cv", False)):
+                n_splits = int(local.get("n_splits", 5))
+                repeats = int(local.get("cv_repeats", 1))
+                base_seed = int(local.get("base_seed", 0))
+                if repeats > 1:
+                    local["cv_obj"] = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=repeats, random_state=base_seed)
+                else:
+                    local["cv_obj"] = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=base_seed)
+        except Exception:
+            pass
         _EVAL_CTX = local
     except Exception:
         _EVAL_CTX = dict(ctx)
@@ -61,7 +73,9 @@ def _evaluate_individual_picklable(individual: List[int]) -> Tuple[float]:
     X = _EVAL_CTX.get("X")
     y = _EVAL_CTX.get("y")
     scoring = _EVAL_CTX.get("scoring", "accuracy")
-    cv = int(_EVAL_CTX.get("cv", 5))
+    cv_param = _EVAL_CTX.get("cv_obj", None)
+    if cv_param is None:
+        cv_param = int(_EVAL_CTX.get("cv", 5))
     alpha = float(_EVAL_CTX.get("alpha", 0.0))
     n_jobs_eval = int(_EVAL_CTX.get("n_jobs_eval", 1))
     # Prefer per-worker prebuilt classifier; fallback to building one
@@ -69,9 +83,9 @@ def _evaluate_individual_picklable(individual: List[int]) -> Tuple[float]:
     if clf is None:
         clf = make_classifier(_EVAL_CTX.get("classifier", "logistic"))
     base_seed = int(_EVAL_CTX.get("base_seed", 0))
-    # Derive a deterministic RNG for CV splitter from individual bits
+    # Derive a deterministic RNG for CV splitter seeds used when cv is int/randomized
     rng = np.random.RandomState(_seed_from_individual(individual, base_seed))
-    return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng, n_jobs_eval)
+    return evaluate_individual(individual, X, y, clf, scoring, cv_param, alpha, rng, n_jobs_eval)
 
 # Optional AOS imports (LLM-driven adaptive operator selection)
 try:
@@ -224,7 +238,7 @@ def evaluate_individual(
     y: np.ndarray,
     clf: Pipeline,
     scoring: str,
-    cv: int,
+    cv: Union[int, object],
     alpha: float,
     rng: np.random.RandomState,
     n_jobs_eval: int = 1,
@@ -235,8 +249,11 @@ def evaluate_individual(
         return (-1e6,)
 
     X_sel = X[:, mask]
-    # StratifiedKFold for classification
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=int(rng.randint(0, 2**31 - 1)))
+    # CV splitter: allow either an int or a provided splitter object (fixed CV)
+    if isinstance(cv, int):
+        skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=int(rng.randint(0, 2**31 - 1)))
+    else:
+        skf = cv
     try:
         scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=skf, n_jobs=n_jobs_eval)
         mean_score = float(np.mean(scores))
@@ -258,6 +275,7 @@ def cv_scores_for_mask(
     scoring: str,
     cv: int,
     random_state: Optional[int],
+    cv_override: Optional[object] = None,
 ) -> Tuple[float, float, List[float]]:
     """
     Compute unpenalized CV scores (mean, std, per-fold) for a given mask.
@@ -267,7 +285,10 @@ def cv_scores_for_mask(
     if not mask.any():
         return float("nan"), float("nan"), []
     X_sel = X[:, mask]
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=(random_state if random_state is not None else 0))
+    if cv_override is not None:
+        skf = cv_override
+    else:
+        skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=(random_state if random_state is not None else 0))
     try:
         scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=skf, n_jobs=None)
         return float(np.mean(scores)), float(np.std(scores)), [float(s) for s in scores]
@@ -322,6 +343,8 @@ def run_ga(
     seed: Optional[int],
     n_procs: int = 1,
     n_jobs_eval: int = 1,
+    fixed_cv: bool = False,
+    cv_repeats: int = 1,
     op_switch_interval: int = 10,
     disable_op_switch: bool = False,
     sr_fair_cv: bool = False,
@@ -368,9 +391,23 @@ def run_ga(
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
     clf = make_classifier(classifier)
+    # Build fixed CV splitter if requested
+    cv_for_eval: Union[int, object]
+    if fixed_cv:
+        base_seed = seed if seed is not None else 0
+        if cv_repeats and int(cv_repeats) > 1:
+            cv_for_eval = RepeatedStratifiedKFold(n_splits=cv, n_repeats=int(cv_repeats), random_state=int(base_seed))
+        else:
+            cv_for_eval = StratifiedKFold(n_splits=cv, shuffle=True, random_state=int(base_seed))
+        try:
+            print(f"[CV] Using fixed CV: {'RepeatedStratifiedKFold' if (cv_repeats and int(cv_repeats) > 1) else 'StratifiedKFold'} with seed={int(base_seed)} and n_splits={cv}")
+        except Exception:
+            pass
+    else:
+        cv_for_eval = cv
     # Default (serial) evaluation function
     def eval_wrapper(individual: List[int]):
-        return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng_np, n_jobs_eval)
+        return evaluate_individual(individual, X, y, clf, scoring, cv_for_eval, alpha, rng_np, n_jobs_eval)
     toolbox.register("evaluate", eval_wrapper)
     toolbox.register("mate", tools.cxTwoPoint)
     toolbox.register("mutate", tools.mutFlipBit, indpb=1.0 / n_features)
@@ -392,6 +429,9 @@ def run_ga(
                 "n_jobs_eval": int(n_jobs_eval),
                 "classifier": classifier,
                 "base_seed": int(seed if seed is not None else 0),
+                "fixed_cv": bool(fixed_cv),
+                "cv_repeats": int(cv_repeats),
+                "n_splits": int(cv),
             }
             pool = _mp.Pool(processes=int(n_procs), initializer=_init_eval_worker, initargs=(worker_ctx,))
             toolbox.unregister("map")
@@ -1186,6 +1226,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mutpb", type=float, default=0.2, help="Mutation probability")
     p.add_argument("--init-prob", type=float, default=0.1, help="Initial probability a feature is selected")
     p.add_argument("--seed", type=int, default=None, help="Random seed")
+    # CV control
+    p.add_argument("--fixed-cv", action="store_true", help="Use a fixed CV splitter (seeded) during GA evaluation for determinism")
+    p.add_argument("--cv-repeats", type=int, default=1, help="If >1 with --fixed-cv, use RepeatedStratifiedKFold with this many repeats")
     p.add_argument("--n-procs", type=int, default=1, help="Worker processes for parallel evaluation (DEAP map)")
     p.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs for sklearn cross_val_score inside each evaluation")
 
@@ -1812,6 +1855,8 @@ def main():
     n_procs = args.n_procs
     eval_n_jobs = args.eval_n_jobs
     sr_fair_cv = args.sr_fair_cv
+    fixed_cv = args.fixed_cv
+    cv_repeats = args.cv_repeats
     op_switch_interval = args.op_switch_interval
     disable_op_switch = args.disable_op_switch
     adaptive_switch = args.adaptive_switch
@@ -1844,6 +1889,11 @@ def main():
         scoring = ga.get("scoring", scoring)
         classifier = ga.get("classifier", classifier)
         sr_fair_cv = bool(ga.get("sr_fair_cv", sr_fair_cv))
+        fixed_cv = bool(ga.get("fixed_cv", fixed_cv))
+        try:
+            cv_repeats = int(ga.get("cv_repeats", cv_repeats))
+        except Exception:
+            pass
         try:
             n_procs = int(ga.get("n_procs", args.n_procs))
         except Exception:
@@ -1907,6 +1957,8 @@ def main():
         seed=args.seed,
         n_procs=n_procs,
         n_jobs_eval=eval_n_jobs,
+        fixed_cv=fixed_cv,
+        cv_repeats=cv_repeats,
         op_switch_interval=op_switch_interval,
         disable_op_switch=disable_op_switch,
         sr_fair_cv=sr_fair_cv,
@@ -1935,8 +1987,15 @@ def main():
 
     # Compute unpenalized downstream metric for the best mask using the SAME scoring used in GA
     clf = make_classifier(classifier)
+    cv_override = None
+    if fixed_cv:
+        base_seed = int(args.seed if args.seed is not None else 0)
+        if cv_repeats and int(cv_repeats) > 1:
+            cv_override = RepeatedStratifiedKFold(n_splits=cv, n_repeats=int(cv_repeats), random_state=base_seed)
+        else:
+            cv_override = StratifiedKFold(n_splits=cv, shuffle=True, random_state=base_seed)
     cv_mean, cv_std, fold_scores = cv_scores_for_mask(
-        best_mask, data.X, data.y, clf, scoring, cv, args.seed
+        best_mask, data.X, data.y, clf, scoring, cv, args.seed, cv_override=cv_override
     )
 
     # Augment best_solution.json with downstream metrics and penalty components
