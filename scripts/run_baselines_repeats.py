@@ -58,6 +58,9 @@ def run_once(args: argparse.Namespace, run_idx: int, seed: int) -> int:
             cmd += ["--openml-id", str(args.openml_id)]
         if args.openml_version is not None:
             cmd += ["--openml-version", str(args.openml_version)]
+    # Pass data-home if provided (useful for OpenML caching)
+    if getattr(args, "data_home", None):
+        cmd += ["--data-home", args.data_home]
     if args.k_grid:
         cmd += ["--k-grid", args.k_grid]
     if args.C_grid:
@@ -110,13 +113,14 @@ def aggregate(out_root: str, repeats: int, summary_name: str = "summary.csv") ->
 
 def main():
     ap = argparse.ArgumentParser()
-    # dataset sources (choose one; default sklearn breast_cancer)
-    ap.add_argument("--sklearn-dataset", type=str, default="breast_cancer")
+    # dataset sources (choose one)
+    ap.add_argument("--sklearn-dataset", type=str, default=None)
     ap.add_argument("--csv", type=str, default=None)
     ap.add_argument("--target-col", type=str, default=None)
     ap.add_argument("--openml-name", type=str, default=None)
     ap.add_argument("--openml-id", type=str, default=None)
     ap.add_argument("--openml-version", type=int, default=None)
+    ap.add_argument("--data-home", type=str, default=None, help="Cache directory for OpenML downloads")
     # evaluation settings
     ap.add_argument("--classifier", type=str, default="svm")
     ap.add_argument("--scoring", type=str, default="accuracy")
