@@ -23,6 +23,7 @@ import random
 from typing import Dict, List, Optional, Sequence, Tuple
 from multiprocessing import Pool
 import os as _os
+import time
 
 import numpy as np
 import pandas as pd
@@ -148,9 +149,9 @@ def baseline_chi2_kbest(X, y, k_grid: Sequence[int]) -> List[List[int]]:
     return masks
 
 
-def baseline_rf_topk(X, y, k_grid: Sequence[int], seed: Optional[int]) -> List[List[int]]:
+def baseline_rf_topk(X, y, k_grid: Sequence[int], seed: Optional[int], n_estimators: int = 200) -> List[List[int]]:
     d = X.shape[1]
-    rf = RandomForestClassifier(n_estimators=400, random_state=seed)
+    rf = RandomForestClassifier(n_estimators=int(n_estimators), random_state=seed, n_jobs=1)
     rf.fit(X, y)
     importances = rf.feature_importances_
     order = np.argsort(importances)
@@ -187,7 +188,7 @@ def baseline_l1_logistic(X, y, C_grid: Sequence[float], seed: Optional[int]) -> 
     return masks
 
 
-def baseline_rfe_svm(X, y, k_grid: Sequence[int], seed: Optional[int]) -> List[List[int]]:
+def baseline_rfe_svm(X, y, k_grid: Sequence[int], seed: Optional[int], step: int = 1) -> List[List[int]]:
     d = X.shape[1]
     masks: List[List[int]] = []
     for k in k_grid:
@@ -196,7 +197,8 @@ def baseline_rfe_svm(X, y, k_grid: Sequence[int], seed: Optional[int]) -> List[L
         k = min(k, d)
         try:
             est = LinearSVC(C=1.0, dual=False, max_iter=3000, random_state=seed)
-            rfe = RFE(estimator=est, n_features_to_select=k, step=1)
+            # Allow larger steps to reduce number of refits dramatically on high-d problems
+            rfe = RFE(estimator=est, n_features_to_select=k, step=max(1, int(step)))
             rfe.fit(X, y)
             support = rfe.support_
             indices = np.where(support)[0]
@@ -303,6 +305,8 @@ def main():
     ap.add_argument("--mutpb", type=float, default=0.2)
 
     ap.add_argument("--output", type=str, default="baseline_results")
+    ap.add_argument("--rfe-step", type=int, default=10, help="RFE step for rfe_svm (default 10; larger is faster, less precise)")
+    ap.add_argument("--rf-estimators", type=int, default=200, help="n_estimators for rf_importance (default 200)")
     # Parallel options
     ap.add_argument("--n-procs", type=int, default=1, help="Processes for evaluating masks in parallel")
     ap.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs used inside cross_val_score for each evaluation")
@@ -319,6 +323,8 @@ def main():
     )
 
     X, y, feat_names = data.X, data.y, [str(n) for n in data.feature_names]
+    d = X.shape[1]
+    print(f"[DATA] Loaded dataset: X.shape={X.shape}, y.shape={y.shape}")
     d = X.shape[1]
 
     if args.k_grid == "auto":
@@ -354,8 +360,9 @@ def main():
         best_mask: Optional[List[int]] = None
         detail: Dict[str, object] = {"method": method}
 
+        t_gen = time.time()
         if method == "rfe_svm":
-            masks = baseline_rfe_svm(X, y, k_grid, args.seed)
+            masks = baseline_rfe_svm(X, y, k_grid, args.seed, step=args.rfe_step)
             detail["params"] = {"k_grid": k_grid, "estimator": "LinearSVC"}
         elif method == "lasso":
             masks = baseline_l1_logistic(X, y, C_grid, args.seed)
@@ -367,27 +374,34 @@ def main():
             masks = baseline_kbest(X, y, k_grid, score_fn="mi")
             detail["params"] = {"k_grid": k_grid}
         elif method == "rf_importance":
-            masks = baseline_rf_topk(X, y, k_grid, args.seed)
-            detail["params"] = {"k_grid": k_grid}
+            masks = baseline_rf_topk(X, y, k_grid, args.seed, n_estimators=args.rf_estimators)
+            detail["params"] = {"k_grid": k_grid, "n_estimators": args.rf_estimators}
         elif method == "pca":
             masks = baseline_pca_importance(X, k_grid)
             detail["params"] = {"k_grid": k_grid}
         else:
             raise ValueError(f"Unknown baseline method: {method}")
+        print(f"[BASELINE] {method}: generated {len(masks)} masks in {time.time()-t_gen:.2f}s; evaluating...")
 
         # Evaluate all masks; tie-break by fewer features when fitness nearly equal
         best_cv_mean = float("nan")
         best_cv_std = float("nan")
         best_k = d + 1
         if masks:
+            processed = 0
+            total = len(masks)
+            t0 = time.time()
             if use_pool and pool is not None:
-                results = pool.map(_eval_mask_picklable, masks)
+                chunksize = max(1, total // max(1, int(args.n_procs) * 4))
+                iterator = pool.imap(_eval_mask_picklable, masks, chunksize=chunksize)
             else:
-                results = [
-                    eval_mask_with_scores(m, X, y, args.classifier, args.scoring, args.cv, args.alpha, args.seed, args.eval_n_jobs)
-                    for m in masks
-                ]
-            for m, (fit, cv_mean, cv_std) in zip(masks, results):
+                def _iter_serial():
+                    for mm in masks:
+                        yield eval_mask_with_scores(mm, X, y, args.classifier, args.scoring, args.cv, args.alpha, args.seed, args.eval_n_jobs)
+                iterator = _iter_serial()
+
+            for m, res in zip(masks, iterator):
+                fit, cv_mean, cv_std = res
                 k_now = int(sum(1 for b in m if b))
                 if (fit > best_fit + 1e-12) or (abs(fit - best_fit) <= 1e-12 and k_now < best_k):
                     best_fit = fit
@@ -395,6 +409,12 @@ def main():
                     best_cv_std = cv_std
                     best_mask = m
                     best_k = k_now
+                processed += 1
+                if processed == total or processed % max(1, min(20, total // 10)) == 0:
+                    elapsed = time.time() - t0
+                    rate = processed / max(elapsed, 1e-6)
+                    eta = (total - processed) / max(rate, 1e-6)
+                    print(f"[PROGRESS] {method}: {processed}/{total} masks, {elapsed:.1f}s elapsed, ETA ~{eta:.1f}s")
 
         if best_mask is None:
             best_mask = [0] * d

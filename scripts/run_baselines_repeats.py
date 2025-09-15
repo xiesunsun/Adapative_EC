@@ -76,6 +76,17 @@ def run_once(args: argparse.Namespace, run_idx: int, seed: int) -> int:
         cmd += ["--C-grid", args.C_grid]
     if args.baselines:
         cmd += ["--baselines", args.baselines]
+    # Forward parallel options to compare_baselines if present
+    if hasattr(args, "n_procs") and args.n_procs:
+        cmd += ["--n-procs", str(args.n_procs)]
+    if hasattr(args, "eval_n_jobs") and args.eval_n_jobs is not None:
+        cmd += ["--eval-n-jobs", str(args.eval_n_jobs)]
+    # Forward rfe step if provided
+    if hasattr(args, "rfe_step") and args.rfe_step is not None:
+        cmd += ["--rfe-step", str(args.rfe_step)]
+    # Forward rf estimators if provided
+    if hasattr(args, "rf_estimators") and args.rf_estimators is not None:
+        cmd += ["--rf-estimators", str(args.rf_estimators)]
     print("[RUN]", " ".join(cmd))
     return subprocess.call(cmd)
 
@@ -149,6 +160,11 @@ def main():
     ap.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs inside cross_val_score in compare_baselines")
     # output
     ap.add_argument("--out-root", type=str, default="baseline_repeats/bc")
+    # parallel options for compare_baselines
+    ap.add_argument("--n-procs", type=int, default=1, help="Processes for mask evaluation in compare_baselines")
+    ap.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs inside cross_val_score in compare_baselines")
+    ap.add_argument("--rfe-step", type=int, default=None, help="Override RFE step for rfe_svm in compare_baselines")
+    ap.add_argument("--rf-estimators", type=int, default=None, help="Override n_estimators for rf_importance in compare_baselines")
     args = ap.parse_args()
 
     os.makedirs(args.out_root, exist_ok=True)
