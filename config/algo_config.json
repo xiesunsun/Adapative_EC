@@ -1,7 +1,7 @@
 {
   "ga": {
-    "pop_size": 60,
-    "generations": 50,
+    "pop_size": 50,
+    "generations": 10,
     "cv": 5,
     "alpha": 0.02,
     "scoring": "accuracy",
@@ -18,7 +18,7 @@
   },
   "switching": {
     "mode": "fixed", 
-    "interval": 10,
+    "interval": 20,
     "adaptive": {
       "enabled": true,
       "base_interval": 10,

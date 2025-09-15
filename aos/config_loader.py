@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Any, Dict, List
+from datetime import datetime, timezone
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -59,6 +60,8 @@ def build_decision_payload_from_configs(configs: Dict[str, Any], state_text: str
     sel_txt = _format_operator_pool_for_prompt(ops.get("selection", []))
     cx_txt = _format_operator_pool_for_prompt(ops.get("crossover", []))
     mut_txt = _format_operator_pool_for_prompt(ops.get("mutation", []))
+    # Include a timestamp so prompts differ across runs and can be audited
+    requested_at_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload = {
         "dataset_size": ti.get("dataset_size"),
         "num_features": ti.get("num_features"),
@@ -72,6 +75,7 @@ def build_decision_payload_from_configs(configs: Dict[str, Any], state_text: str
         "selection": sel_txt,
         "crossover": cx_txt,
         "mutation": mut_txt,
+        "requested_at": requested_at_utc,
     }
     return payload
 

@@ -96,6 +96,9 @@ def build_decision_prompt_v2(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     u.append("The following provides information about our feature selection task and the evolutionary algorithm being used.")
     u.append("")
     u.append("1. Feature Selection Task Information")
+    # Add the request time if provided so each prompt is unique and traceable
+    if payload.get('requested_at'):
+        u.append(f"Request Time (UTC): {payload.get('requested_at')}")
     u.append(f"Dataset Size: {payload.get('dataset_size')}")
     u.append(f"Number of Features: {payload.get('num_features')}")
     u.append(f"Downstream Classification Model: {payload.get('classification_model')}")

@@ -27,6 +27,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from typing import Any, Dict
+from datetime import datetime, timezone
 
 # Optional AOS imports (LLM-driven adaptive operator selection)
 try:
@@ -177,6 +178,7 @@ def evaluate_individual(
     cv: int,
     alpha: float,
     rng: np.random.RandomState,
+    n_jobs_eval: int = 1,
 ) -> Tuple[float]:
     mask = np.array(individual, dtype=bool)
     # Ensure at least one feature selected; if not, return a very low fitness
@@ -187,7 +189,7 @@ def evaluate_individual(
     # StratifiedKFold for classification
     skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=int(rng.randint(0, 2**31 - 1)))
     try:
-        scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=skf, n_jobs=None)
+        scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=skf, n_jobs=n_jobs_eval)
         mean_score = float(np.mean(scores))
     except Exception:
         # In case model fails on a particular subset, assign very low fitness
@@ -269,6 +271,8 @@ def run_ga(
     mutpb: float,
     init_prob: float,
     seed: Optional[int],
+    n_procs: int = 1,
+    n_jobs_eval: int = 1,
     op_switch_interval: int = 10,
     disable_op_switch: bool = False,
     sr_fair_cv: bool = False,
@@ -317,12 +321,25 @@ def run_ga(
     clf = make_classifier(classifier)
 
     def eval_wrapper(individual: List[int]):
-        return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng_np)
+        return evaluate_individual(individual, X, y, clf, scoring, cv, alpha, rng_np, n_jobs_eval)
 
     toolbox.register("evaluate", eval_wrapper)
     toolbox.register("mate", tools.cxTwoPoint)
     toolbox.register("mutate", tools.mutFlipBit, indpb=1.0 / n_features)
     toolbox.register("select", tools.selTournament, tournsize=3)
+
+    # Parallel mapping: default to built-in map; override with multiprocessing pool if n_procs > 1
+    toolbox.register("map", map)
+    pool = None
+    if n_procs and int(n_procs) > 1:
+        try:
+            import multiprocessing as _mp
+            pool = _mp.Pool(processes=int(n_procs))
+            toolbox.unregister("map")
+            toolbox.register("map", pool.map)
+            print(f"[PARALLEL] Enabled with n_procs={n_procs}; eval n_jobs={n_jobs_eval}")
+        except Exception as _e:
+            print(f"[PARALLEL] Failed to start pool ({_e}); falling back to serial map")
 
     # Dynamic operator cores (for switching): register default cores
     toolbox.register("mate_core", tools.cxTwoPoint)
@@ -472,7 +489,7 @@ def run_ga(
 
         # Evaluate the entire population
         invalid_ind = [ind for ind in population if not ind.fitness.valid]
-        fitnesses = list(map(toolbox.evaluate, invalid_ind))
+        fitnesses = list(toolbox.map(toolbox.evaluate, invalid_ind))
         for ind, fit in zip(invalid_ind, fitnesses):
             ind.fitness.values = fit
 
@@ -532,9 +549,11 @@ def run_ga(
                 if aos_debug:
                     print("[AOS][INIT] Requesting initial operators and rates...")
                 from aos.config_loader import build_decision_payload_from_configs
+                # Include a timestamp in the initial state text so the LLM prompt varies across runs
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 init_payload = build_decision_payload_from_configs(
                     aos_cfg,
-                    state_text="Initial stage: please choose initial operators and cxpb/mutpb.",
+                    state_text=f"Initial stage at {ts}: please choose initial operators and cxpb/mutpb.",
                     current_iteration=0,
                 )
                 if aos_debug:
@@ -858,7 +877,7 @@ def run_ga(
                                 return -1e6
                             X_sel = X[:, mask]
                             try:
-                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=None)
+                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=n_jobs_eval)
                                 mean_score = float(np.mean(scores))
                             except Exception:
                                 return -1e6
@@ -894,7 +913,7 @@ def run_ga(
                             else:
                                 X_sel = X[:, mask]
                                 try:
-                                    scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=None)
+                                    scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=n_jobs_eval)
                                     mean_score = float(np.mean(scores))
                                 except Exception:
                                     mean_score = -1e6
@@ -908,7 +927,7 @@ def run_ga(
 
             # Evaluate the individuals with an invalid fitness
             invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
-            fitnesses = list(map(toolbox.evaluate, invalid_ind))
+            fitnesses = list(toolbox.map(toolbox.evaluate, invalid_ind))
             for ind, fit in zip(invalid_ind, fitnesses):
                 ind.fitness.values = fit
 
@@ -930,7 +949,7 @@ def run_ga(
                         else:
                             X_sel = X[:, mask]
                             try:
-                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=None)
+                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=n_jobs_eval)
                                 mean_score = float(np.mean(scores))
                             except Exception:
                                 mean_score = -1e6
@@ -952,7 +971,7 @@ def run_ga(
                         else:
                             X_sel = X[:, mask]
                             try:
-                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=None)
+                                scores = cross_val_score(clf, X_sel, y, scoring=scoring, cv=sr_skf, n_jobs=n_jobs_eval)
                                 mean_score = float(np.mean(scores))
                             except Exception:
                                 mean_score = -1e6
@@ -1061,12 +1080,21 @@ def run_ga(
         return population, logbook
 
     # Run GA
-    _, logbook = ea_simple_repair(pop, toolbox, cxpb=cxpb, mutpb=mutpb, ngen=generations, stats=stats, halloffame=hof)
+    try:
+        _, logbook = ea_simple_repair(pop, toolbox, cxpb=cxpb, mutpb=mutpb, ngen=generations, stats=stats, halloffame=hof)
 
-    best_ind = hof[0]
-    best_mask = list(map(int, best_ind))
-    best_fit = float(best_ind.fitness.values[0])
-    return best_mask, best_fit, logbook, hof
+        best_ind = hof[0]
+        best_mask = list(map(int, best_ind))
+        best_fit = float(best_ind.fitness.values[0])
+        return best_mask, best_fit, logbook, hof
+    finally:
+        # Clean up worker pool if created
+        try:
+            if pool is not None:
+                pool.close()
+                pool.join()
+        except Exception:
+            pass
 
 
 # -----------------------------
@@ -1096,6 +1124,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mutpb", type=float, default=0.2, help="Mutation probability")
     p.add_argument("--init-prob", type=float, default=0.1, help="Initial probability a feature is selected")
     p.add_argument("--seed", type=int, default=None, help="Random seed")
+    p.add_argument("--n-procs", type=int, default=1, help="Worker processes for parallel evaluation (DEAP map)")
+    p.add_argument("--eval-n-jobs", type=int, default=1, help="n_jobs for sklearn cross_val_score inside each evaluation")
 
     p.add_argument("--output", type=str, default="ga_results", help="Directory to save outputs")
     p.add_argument("--use-config", action="store_true", help="Load run settings from config/*.json instead of CLI flags")
@@ -1775,6 +1805,8 @@ def main():
         mutpb=mutpb,
         init_prob=args.init_prob,
         seed=args.seed,
+        n_procs=args.n_procs,
+        n_jobs_eval=args.eval_n_jobs,
         op_switch_interval=op_switch_interval,
         disable_op_switch=disable_op_switch,
         sr_fair_cv=sr_fair_cv,
